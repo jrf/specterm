@@ -44,9 +44,14 @@ pub fn spectrum(samples: &[f32]) -> Vec<f32> {
 
 /// Bin a full spectrum into `n` bars using logarithmic frequency scaling.
 ///
-/// Low frequencies get more bars, high frequencies are compressed —
-/// matching human pitch perception.
-pub fn bin_spectrum(magnitudes: &[f32], n: usize, sample_rate: u32) -> Vec<f32> {
+/// `low_freq` and `high_freq` control the visible frequency range.
+pub fn bin_spectrum(
+    magnitudes: &[f32],
+    n: usize,
+    sample_rate: u32,
+    low_freq: f32,
+    high_freq: f32,
+) -> Vec<f32> {
     if magnitudes.is_empty() || n == 0 {
         return vec![0.0; n];
     }
@@ -54,9 +59,8 @@ pub fn bin_spectrum(magnitudes: &[f32], n: usize, sample_rate: u32) -> Vec<f32> 
     let nyquist = sample_rate as f32 / 2.0;
     let freq_per_bin = nyquist / magnitudes.len() as f32;
 
-    // Logarithmic frequency range: 20 Hz to nyquist
-    let min_freq: f32 = 20.0;
-    let max_freq: f32 = nyquist.min(20_000.0);
+    let min_freq = low_freq.max(1.0);
+    let max_freq = high_freq.min(nyquist);
     let log_min = min_freq.ln();
     let log_max = max_freq.ln();
 
@@ -67,7 +71,7 @@ pub fn bin_spectrum(magnitudes: &[f32], n: usize, sample_rate: u32) -> Vec<f32> 
         let f_hi =
             ((log_min + (log_max - log_min) * (i + 1) as f32 / n as f32).exp()) / freq_per_bin;
 
-        let lo = (f_lo as usize).max(0).min(magnitudes.len() - 1);
+        let lo = (f_lo as usize).min(magnitudes.len() - 1);
         let hi = (f_hi as usize).max(lo + 1).min(magnitudes.len());
 
         let sum: f32 = magnitudes[lo..hi].iter().sum();
@@ -81,8 +85,90 @@ pub fn bin_spectrum(magnitudes: &[f32], n: usize, sample_rate: u32) -> Vec<f32> 
 ///
 /// `factor` controls decay: 0.0 = no smoothing, 0.9 = heavy smoothing.
 pub fn smooth(prev: &[f32], current: &[f32], factor: f32) -> Vec<f32> {
+    if prev.len() != current.len() {
+        return current.to_vec();
+    }
     prev.iter()
         .zip(current.iter())
         .map(|(p, c)| p * factor + c * (1.0 - factor))
         .collect()
+}
+
+/// Monstercat-style smoothing: each peak spreads influence to its neighbors
+/// with exponential falloff, creating a smooth connected envelope.
+///
+/// `strength` controls the falloff rate (0.5–0.9 typical, higher = wider spread).
+pub fn monstercat(bars: &mut [f32], strength: f32) {
+    let n = bars.len();
+    if n < 2 {
+        return;
+    }
+
+    // Forward pass: each bar pulls up its right neighbor
+    for i in 1..n {
+        let prev = bars[i - 1] * strength;
+        if prev > bars[i] {
+            bars[i] = prev;
+        }
+    }
+
+    // Backward pass: each bar pulls up its left neighbor
+    for i in (0..n - 1).rev() {
+        let next = bars[i + 1] * strength;
+        if next > bars[i] {
+            bars[i] = next;
+        }
+    }
+}
+
+/// Apply a noise floor — zero out any bar below the threshold.
+pub fn noise_gate(bars: &mut [f32], floor: f32) {
+    for bar in bars.iter_mut() {
+        if *bar < floor {
+            *bar = 0.0;
+        }
+    }
+}
+
+/// Automatic sensitivity: tracks a rolling peak and normalizes bars
+/// so the display uses the full height regardless of volume.
+pub struct AutoSensitivity {
+    peak: f32,
+    /// How fast the peak decays toward the current max (per frame).
+    /// Lower = slower decay = more stable. 0.01–0.05 typical.
+    decay: f32,
+    /// Minimum peak to prevent division by tiny numbers during silence.
+    min_peak: f32,
+}
+
+impl AutoSensitivity {
+    pub fn new() -> Self {
+        Self {
+            peak: 0.001,
+            decay: 0.05,
+            min_peak: 0.0001,
+        }
+    }
+
+    /// Normalize bars in-place based on tracked peak.
+    /// Returns the current sensitivity peak for diagnostics.
+    pub fn apply(&mut self, bars: &mut [f32]) -> f32 {
+        let current_max = bars.iter().cloned().fold(0.0f32, f32::max);
+
+        // If current frame is louder, jump up immediately
+        if current_max > self.peak {
+            self.peak = current_max;
+        } else {
+            // Slowly decay toward current level
+            self.peak = self.peak * (1.0 - self.decay) + current_max * self.decay;
+        }
+
+        let peak = self.peak.max(self.min_peak);
+
+        for bar in bars.iter_mut() {
+            *bar /= peak;
+        }
+
+        peak
+    }
 }

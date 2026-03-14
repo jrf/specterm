@@ -48,7 +48,10 @@ pub enum Action {
     Quit,
     SelectDevice,
     SelectTheme,
+    Settings,
     Help,
+    MoreBars,
+    FewerBars,
 }
 
 /// Poll for input events. Returns the action to take.
@@ -64,7 +67,10 @@ pub fn poll_input(timeout: Duration) -> Result<Action> {
             match key.code {
                 KeyCode::Char('d') => return Ok(Action::SelectDevice),
                 KeyCode::Char('t') => return Ok(Action::SelectTheme),
+                KeyCode::Char('s') => return Ok(Action::Settings),
                 KeyCode::Char('?') => return Ok(Action::Help),
+                KeyCode::Up | KeyCode::Char('+') => return Ok(Action::MoreBars),
+                KeyCode::Down | KeyCode::Char('-') => return Ok(Action::FewerBars),
                 _ => {}
             }
         }
@@ -240,12 +246,169 @@ pub fn theme_menu(terminal: &mut Term, themes: &[Theme], current_idx: usize) -> 
     }
 }
 
+/// Mutable settings that can be changed at runtime.
+#[derive(Clone)]
+pub struct Settings {
+    pub smoothing: f32,
+    pub monstercat: bool,
+    pub noise_floor: f32,
+    pub theme_idx: usize,
+}
+
+/// Show settings menu. Returns updated settings.
+pub fn settings_menu(terminal: &mut Term, settings: &Settings, themes: &[Theme]) -> Result<Option<Settings>> {
+    let mut current = settings.clone();
+    let mut selected: usize = 0;
+    let num_items = 4;
+
+    loop {
+        let theme = &themes[current.theme_idx.min(themes.len() - 1)];
+
+        terminal.draw(|frame| {
+            let area = frame.area();
+
+            let smoothing_bar = slider_bar(current.smoothing, 0.0, 0.99, 20);
+            let noise_bar = slider_bar(current.noise_floor, 0.0, 0.05, 20);
+
+            // Theme swatch
+            let mut theme_spans: Vec<Span> = vec![Span::styled(
+                format!("  {:16}", "Theme"),
+                Style::default().fg(Color::Cyan),
+            )];
+            for &color in theme.gradient {
+                theme_spans.push(Span::styled("██", Style::default().fg(color)));
+            }
+            theme_spans.push(Span::raw(format!("  {}", theme.name)));
+
+            let items: Vec<ListItem> = vec![
+                ListItem::new(Line::from(theme_spans)),
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!("  {:16}", "Smoothing"),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::raw(format!("{} {:.2}", smoothing_bar, current.smoothing)),
+                ])),
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!("  {:16}", "Monstercat"),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::raw(if current.monstercat { "[ON]" } else { "[OFF]" }),
+                ])),
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!("  {:16}", "Noise floor"),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::raw(format!("{} {:.4}", noise_bar, current.noise_floor)),
+                ])),
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(i, item)| {
+                if i == selected {
+                    item.style(
+                        Style::default()
+                            .bg(Color::Rgb(40, 40, 40))
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    item
+                }
+            })
+            .collect();
+
+            let list = List::new(items).block(
+                Block::default()
+                    .title(" sonitus — settings ")
+                    .title_bottom(" ↑/↓ navigate  ←/→ adjust  Enter/Space toggle  Esc back ")
+                    .borders(Borders::ALL)
+                    .padding(Padding::new(2, 2, 1, 1)),
+            );
+
+            frame.render_widget(list, area);
+        })?;
+
+        if event::poll(Duration::from_millis(50))? {
+            if let Event::Key(key) = event::read()? {
+                match key.code {
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        selected = selected.saturating_sub(1);
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if selected + 1 < num_items {
+                            selected += 1;
+                        }
+                    }
+                    KeyCode::Left | KeyCode::Char('h') => {
+                        adjust_setting(&mut current, selected, -1, themes.len());
+                    }
+                    KeyCode::Right | KeyCode::Char('l') => {
+                        adjust_setting(&mut current, selected, 1, themes.len());
+                    }
+                    KeyCode::Enter | KeyCode::Char(' ') => {
+                        if selected == 2 {
+                            current.monstercat = !current.monstercat;
+                        }
+                    }
+                    KeyCode::Esc | KeyCode::Char('s') => {
+                        return Ok(Some(current));
+                    }
+                    KeyCode::Char('q') => {
+                        return Ok(None);
+                    }
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        return Ok(None);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+fn adjust_setting(settings: &mut Settings, idx: usize, direction: i32, num_themes: usize) {
+    match idx {
+        0 => {
+            // Theme: cycle through themes
+            if direction > 0 {
+                settings.theme_idx = (settings.theme_idx + 1) % num_themes;
+            } else if settings.theme_idx == 0 {
+                settings.theme_idx = num_themes - 1;
+            } else {
+                settings.theme_idx -= 1;
+            }
+        }
+        1 => {
+            // Smoothing: step by 0.05
+            settings.smoothing = (settings.smoothing + direction as f32 * 0.05).clamp(0.0, 0.99);
+        }
+        3 => {
+            // Noise floor: step by 0.002
+            settings.noise_floor =
+                (settings.noise_floor + direction as f32 * 0.002).clamp(0.0, 0.05);
+        }
+        _ => {}
+    }
+}
+
+fn slider_bar(value: f32, min: f32, max: f32, width: usize) -> String {
+    let ratio = ((value - min) / (max - min)).clamp(0.0, 1.0);
+    let filled = (ratio * width as f32) as usize;
+    let empty = width - filled;
+    format!("[{}{}]", "█".repeat(filled), "░".repeat(empty))
+}
+
 /// Show help overlay. Blocks until any key is pressed.
 pub fn help(terminal: &mut Term) -> Result<()> {
     let bindings = [
         ("?", "Show this help"),
         ("d", "Select audio device"),
         ("t", "Select color theme"),
+        ("s", "Settings (smoothing, monstercat, noise)"),
+        ("Up / +", "More bars"),
+        ("Down / -", "Fewer bars"),
         ("q / Esc", "Quit"),
         ("Ctrl+C", "Quit"),
     ];
@@ -254,6 +417,10 @@ pub fn help(terminal: &mut Term) -> Result<()> {
         ("--mode spectrum", "Frequency spectrum bars (default)"),
         ("--mode wave", "Waveform amplitude plot"),
         ("--mode scope", "Oscilloscope (triggered waveform)"),
+        ("--fps N", "Set target framerate (default: 60)"),
+        ("--low-freq N", "Low frequency cutoff in Hz (default: 20)"),
+        ("--high-freq N", "High frequency cutoff in Hz (default: 20000)"),
+        ("--noise-floor N", "Noise gate threshold (default: 0.0)"),
     ];
 
     terminal.draw(|frame| {
@@ -307,9 +474,10 @@ pub fn help(terminal: &mut Term) -> Result<()> {
     }
 }
 
-/// Draw spectrum bars.
+/// Draw spectrum bars. Bars are pre-normalized by AutoSensitivity (0.0–1.0+ range).
 pub fn draw_spectrum(terminal: &mut Term, bars: &[f32], theme: &Theme, device: &str) -> Result<()> {
     let theme_name = theme.name;
+    let num_bars = bars.len();
     terminal.draw(|frame| {
         let area = frame.area();
         let max_val = bars.iter().cloned().fold(0.0f32, f32::max).max(0.001);
@@ -332,7 +500,7 @@ pub fn draw_spectrum(terminal: &mut Term, bars: &[f32], theme: &Theme, device: &
         let chart = BarChart::default()
             .block(
                 Block::default()
-                    .title(format!(" sonitus — spectrum [{}] ", theme_name))
+                    .title(format!(" sonitus — spectrum [{}] ({} bars) ", theme_name, num_bars))
                     .title_bottom(format!(" {} | ? help ", device))
                     .borders(Borders::ALL),
             )
@@ -394,6 +562,95 @@ fn draw_wave_inner(terminal: &mut Term, samples: &[f32], title: &str, bottom: &s
                         color,
                     });
                 }
+            });
+
+        frame.render_widget(canvas, area);
+    })?;
+
+    Ok(())
+}
+
+/// Draw stereo spectrum: left channel bars grow up from center, right channel grows down.
+pub fn draw_stereo(
+    terminal: &mut Term,
+    left_bars: &[f32],
+    right_bars: &[f32],
+    theme: &Theme,
+    device: &str,
+) -> Result<()> {
+    let theme_name = theme.name;
+    let num_bars = left_bars.len();
+
+    terminal.draw(|frame| {
+        let area = frame.area();
+        let inner_w = area.width.saturating_sub(2) as usize;
+        let inner_h = area.height.saturating_sub(2) as f64;
+        let half_h = inner_h / 2.0;
+
+        let left_max = left_bars.iter().cloned().fold(0.0f32, f32::max).max(0.001);
+        let right_max = right_bars.iter().cloned().fold(0.0f32, f32::max).max(0.001);
+
+        let canvas = Canvas::default()
+            .block(
+                Block::default()
+                    .title(format!(" sonitus — stereo [{}] ({} bars) ", theme_name, num_bars))
+                    .title_bottom(format!(" {} | ? help ", device))
+                    .borders(Borders::ALL),
+            )
+            .x_bounds([0.0, inner_w as f64])
+            .y_bounds([-half_h, half_h])
+            .paint(|ctx| {
+                let bar_w = (inner_w as f64 / left_bars.len() as f64).max(1.0);
+
+                // Left channel: bars grow upward from center (y=0)
+                for (i, &v) in left_bars.iter().enumerate() {
+                    let normalized = (v / left_max).clamp(0.0, 1.0);
+                    let height = normalized as f64 * half_h;
+                    let x = i as f64 * bar_w;
+                    let color = theme.bar_color(normalized);
+
+                    // Draw bar as vertical lines
+                    let steps = (height * 2.0).max(1.0) as usize;
+                    for s in 0..steps {
+                        let y = s as f64 / steps as f64 * height;
+                        ctx.draw(&CanvasLine {
+                            x1: x,
+                            y1: y,
+                            x2: x + bar_w - 0.5,
+                            y2: y,
+                            color,
+                        });
+                    }
+                }
+
+                // Right channel: bars grow downward from center (y=0)
+                for (i, &v) in right_bars.iter().enumerate() {
+                    let normalized = (v / right_max).clamp(0.0, 1.0);
+                    let height = normalized as f64 * half_h;
+                    let x = i as f64 * bar_w;
+                    let color = theme.bar_color(normalized);
+
+                    let steps = (height * 2.0).max(1.0) as usize;
+                    for s in 0..steps {
+                        let y = -(s as f64 / steps as f64 * height);
+                        ctx.draw(&CanvasLine {
+                            x1: x,
+                            y1: y,
+                            x2: x + bar_w - 0.5,
+                            y2: y,
+                            color,
+                        });
+                    }
+                }
+
+                // Center line
+                ctx.draw(&CanvasLine {
+                    x1: 0.0,
+                    y1: 0.0,
+                    x2: inner_w as f64,
+                    y2: 0.0,
+                    color: Color::DarkGray,
+                });
             });
 
         frame.render_widget(canvas, area);

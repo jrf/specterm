@@ -92,8 +92,3 @@ pub const THEMES: &[Theme] = &[
         scope_color: Color::White,
     },
 ];
-
-/// Find a theme by name, or return the first (classic) theme.
-pub fn by_name(name: &str) -> &'static Theme {
-    THEMES.iter().find(|t| t.name == name).unwrap_or(&THEMES[0])
-}
