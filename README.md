@@ -2,8 +2,6 @@
 
 Terminal audio visualizer for macOS. Renders real-time spectrum bars, waveforms, oscilloscopes, and stereo visualizations from mic input or system audio.
 
-![spectrum](spectrum.png)
-
 ## Install
 
 Requires Rust and (optionally) Swift for system audio capture.
