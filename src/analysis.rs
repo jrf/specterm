@@ -2,7 +2,7 @@
 
 use std::f32::consts::PI;
 
-use rustfft::{num_complex::Complex, FftPlanner};
+use rustfft::{num_complex::Complex, Fft, FftPlanner};
 
 /// FFT window size. Must be a power of two.
 pub const FFT_SIZE: usize = 2048;
@@ -16,30 +16,40 @@ fn hann_window(samples: &mut [Complex<f32>]) {
     }
 }
 
-/// Compute the magnitude spectrum from a buffer of time-domain samples.
-///
-/// Returns `FFT_SIZE / 2` magnitude values (positive frequencies only).
-pub fn spectrum(samples: &[f32]) -> Vec<f32> {
-    let mut planner = FftPlanner::new();
-    let fft = planner.plan_fft_forward(FFT_SIZE);
+/// Cached FFT plan for reuse across frames.
+pub struct SpectrumAnalyzer {
+    fft: std::sync::Arc<dyn Fft<f32>>,
+}
 
-    let mut buffer: Vec<Complex<f32>> = samples
-        .iter()
-        .take(FFT_SIZE)
-        .map(|&s| Complex { re: s, im: 0.0 })
-        .collect();
+impl SpectrumAnalyzer {
+    pub fn new() -> Self {
+        let mut planner = FftPlanner::new();
+        let fft = planner.plan_fft_forward(FFT_SIZE);
+        Self { fft }
+    }
 
-    // Zero-pad if we have fewer samples than FFT_SIZE
-    buffer.resize(FFT_SIZE, Complex { re: 0.0, im: 0.0 });
+    /// Compute the magnitude spectrum from a buffer of time-domain samples.
+    ///
+    /// Returns `FFT_SIZE / 2` magnitude values (positive frequencies only).
+    pub fn spectrum(&self, samples: &[f32]) -> Vec<f32> {
+        let mut buffer: Vec<Complex<f32>> = samples
+            .iter()
+            .take(FFT_SIZE)
+            .map(|&s| Complex { re: s, im: 0.0 })
+            .collect();
 
-    hann_window(&mut buffer);
-    fft.process(&mut buffer);
+        // Zero-pad if we have fewer samples than FFT_SIZE
+        buffer.resize(FFT_SIZE, Complex { re: 0.0, im: 0.0 });
 
-    // Positive frequencies only, convert to magnitude
-    buffer[..FFT_SIZE / 2]
-        .iter()
-        .map(|c| c.norm() / FFT_SIZE as f32)
-        .collect()
+        hann_window(&mut buffer);
+        self.fft.process(&mut buffer);
+
+        // Positive frequencies only, convert to magnitude
+        buffer[..FFT_SIZE / 2]
+            .iter()
+            .map(|c| c.norm() / FFT_SIZE as f32)
+            .collect()
+    }
 }
 
 /// Bin a full spectrum into `n` bars using logarithmic frequency scaling.
@@ -66,6 +76,7 @@ pub fn bin_spectrum(
 
     let mut bars = vec![0.0f32; n];
 
+    #[allow(clippy::needless_range_loop)]
     for i in 0..n {
         let f_lo = ((log_min + (log_max - log_min) * i as f32 / n as f32).exp()) / freq_per_bin;
         let f_hi =

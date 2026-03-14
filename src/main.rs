@@ -52,6 +52,10 @@ struct Cli {
     #[arg(long)]
     smoothing: Option<f32>,
 
+    /// Number of distinct gradient colors (0 = use all theme stops)
+    #[arg(long)]
+    colors: Option<usize>,
+
     /// List available audio input devices
     #[arg(long)]
     list_devices: bool,
@@ -124,6 +128,7 @@ fn save_state(
     cfg.theme = theme_name.to_string();
     cfg.bars = num_bars;
     cfg.mode = mode.as_str().to_string();
+    cfg.colors = settings.colors;
     let _ = config::save(cfg);
 }
 
@@ -166,6 +171,9 @@ fn main() -> Result<()> {
     if let Some(n) = cli.noise_floor {
         cfg.noise_floor = n;
     }
+    if let Some(c) = cli.colors {
+        cfg.colors = c;
+    }
 
     let mode = Mode::from_str(&cfg.mode);
 
@@ -200,8 +208,10 @@ fn main() -> Result<()> {
         monstercat: cfg.monstercat,
         noise_floor: cfg.noise_floor,
         theme_idx,
+        colors: cfg.colors,
     };
 
+    let analyzer = analysis::SpectrumAnalyzer::new();
     let mut autosens = analysis::AutoSensitivity::new();
     let mut autosens_l = analysis::AutoSensitivity::new();
     let mut autosens_r = analysis::AutoSensitivity::new();
@@ -288,7 +298,7 @@ fn main() -> Result<()> {
                     let buf = mono_buf.lock().unwrap();
                     buf.clone()
                 };
-                let magnitudes = analysis::spectrum(&samples);
+                let magnitudes = analyzer.spectrum(&samples);
                 let bars = analysis::bin_spectrum(
                     &magnitudes, num_bars, sample_rate, low_freq, high_freq,
                 );
@@ -300,7 +310,7 @@ fn main() -> Result<()> {
                     analysis::noise_gate(&mut smoothed, settings.noise_floor);
                 }
                 autosens.apply(&mut smoothed);
-                render::draw_spectrum(&mut terminal, &smoothed, current_theme, &device_name)?;
+                render::draw_spectrum(&mut terminal, &smoothed, current_theme, &device_name, settings.colors)?;
                 prev_bars = smoothed;
             }
             Mode::Stereo => {
@@ -313,8 +323,8 @@ fn main() -> Result<()> {
                     buf.clone()
                 };
 
-                let left_mag = analysis::spectrum(&left_samples);
-                let right_mag = analysis::spectrum(&right_samples);
+                let left_mag = analyzer.spectrum(&left_samples);
+                let right_mag = analyzer.spectrum(&right_samples);
 
                 let left_bars = analysis::bin_spectrum(
                     &left_mag, num_bars, sample_rate, low_freq, high_freq,
@@ -342,7 +352,7 @@ fn main() -> Result<()> {
                 autosens_r.apply(&mut smooth_r);
 
                 render::draw_stereo(
-                    &mut terminal, &smooth_l, &smooth_r, current_theme, &device_name,
+                    &mut terminal, &smooth_l, &smooth_r, current_theme, &device_name, settings.colors,
                 )?;
 
                 prev_left = smooth_l;

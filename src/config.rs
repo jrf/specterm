@@ -17,6 +17,8 @@ pub struct Config {
     pub smoothing: f32,
     pub monstercat: bool,
     pub noise_floor: f32,
+    /// Number of distinct gradient colors (0 = use all stops in the theme).
+    pub colors: usize,
 }
 
 impl Default for Config {
@@ -31,6 +33,7 @@ impl Default for Config {
             smoothing: 0.5,
             monstercat: false,
             noise_floor: 0.0,
+            colors: 0,
         }
     }
 }

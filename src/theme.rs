@@ -15,12 +15,65 @@ pub struct Theme {
     pub scope_color: Color,
 }
 
+/// Convert a ratatui Color to (r, g, b). Named ANSI colors are mapped to
+/// typical terminal defaults.
+fn color_to_rgb(c: Color) -> (u8, u8, u8) {
+    match c {
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::Black => (0, 0, 0),
+        Color::Red => (205, 0, 0),
+        Color::Green => (0, 205, 0),
+        Color::Yellow => (205, 205, 0),
+        Color::Blue => (0, 0, 238),
+        Color::Magenta => (205, 0, 205),
+        Color::Cyan => (0, 205, 205),
+        Color::White => (255, 255, 255),
+        Color::Gray => (128, 128, 128),
+        _ => (255, 255, 255),
+    }
+}
+
+/// Linearly interpolate between two colors. `t` is 0.0–1.0.
+fn lerp_color(a: Color, b: Color, t: f32) -> Color {
+    let (r0, g0, b0) = color_to_rgb(a);
+    let (r1, g1, b1) = color_to_rgb(b);
+    let t = t.clamp(0.0, 1.0);
+    Color::Rgb(
+        (r0 as f32 + (r1 as f32 - r0 as f32) * t) as u8,
+        (g0 as f32 + (g1 as f32 - g0 as f32) * t) as u8,
+        (b0 as f32 + (b1 as f32 - b0 as f32) * t) as u8,
+    )
+}
+
+/// Sample a color from the gradient at position `v` (0.0–1.0), interpolating
+/// between stops.
+fn sample_gradient(gradient: &[Color], v: f32) -> Color {
+    let v = v.clamp(0.0, 1.0);
+    let last = (gradient.len() - 1) as f32;
+    let pos = v * last;
+    let lo = pos as usize;
+    let hi = (lo + 1).min(gradient.len() - 1);
+    let frac = pos - lo as f32;
+    lerp_color(gradient[lo], gradient[hi], frac)
+}
+
 impl Theme {
     /// Pick a gradient color based on normalized amplitude (0.0–1.0).
-    pub fn bar_color(&self, normalized: f32) -> Color {
+    ///
+    /// `num_colors` controls how many distinct colors are produced:
+    /// - `0` = continuous interpolation across the gradient (smoothest)
+    /// - `2..` = quantize to that many distinct bands, each interpolated from
+    ///   the gradient
+    pub fn bar_color(&self, normalized: f32, num_colors: usize) -> Color {
         let v = normalized.clamp(0.0, 1.0);
-        let idx = (v * (self.gradient.len() - 1) as f32) as usize;
-        self.gradient[idx.min(self.gradient.len() - 1)]
+        if num_colors == 0 {
+            return sample_gradient(self.gradient, v);
+        }
+        // Quantize to num_colors discrete bands
+        let bucket = (v * num_colors as f32) as usize;
+        let bucket = bucket.min(num_colors - 1);
+        let t = bucket as f32 / (num_colors - 1).max(1) as f32;
+        sample_gradient(self.gradient, t)
     }
 }
 
@@ -78,6 +131,18 @@ pub const THEMES: &[Theme] = &[
         ],
         wave_color: Color::Rgb(0, 200, 0),
         scope_color: Color::Rgb(0, 255, 0),
+    },
+    Theme {
+        name: "synthwave",
+        gradient: &[
+            Color::Rgb(15, 0, 40),
+            Color::Rgb(75, 0, 130),
+            Color::Rgb(180, 0, 180),
+            Color::Rgb(255, 20, 147),
+            Color::Rgb(255, 100, 50),
+        ],
+        wave_color: Color::Rgb(255, 20, 147),
+        scope_color: Color::Rgb(180, 0, 180),
     },
     Theme {
         name: "mono",

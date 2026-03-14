@@ -253,13 +253,15 @@ pub struct Settings {
     pub monstercat: bool,
     pub noise_floor: f32,
     pub theme_idx: usize,
+    /// Number of distinct gradient colors (0 = all).
+    pub colors: usize,
 }
 
 /// Show settings menu. Returns updated settings.
 pub fn settings_menu(terminal: &mut Term, settings: &Settings, themes: &[Theme]) -> Result<Option<Settings>> {
     let mut current = settings.clone();
     let mut selected: usize = 0;
-    let num_items = 4;
+    let num_items = 5;
 
     loop {
         let theme = &themes[current.theme_idx.min(themes.len() - 1)];
@@ -302,6 +304,17 @@ pub fn settings_menu(terminal: &mut Term, settings: &Settings, themes: &[Theme])
                         Style::default().fg(Color::Cyan),
                     ),
                     Span::raw(format!("{} {:.4}", noise_bar, current.noise_floor)),
+                ])),
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!("  {:16}", "Colors"),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::raw(if current.colors == 0 {
+                        "all".to_string()
+                    } else {
+                        current.colors.to_string()
+                    }),
                 ])),
             ]
             .into_iter()
@@ -389,6 +402,22 @@ fn adjust_setting(settings: &mut Settings, idx: usize, direction: i32, num_theme
             settings.noise_floor =
                 (settings.noise_floor + direction as f32 * 0.002).clamp(0.0, 0.05);
         }
+        4 => {
+            // Colors: 0 (all), 2..=16
+            if direction > 0 {
+                settings.colors = match settings.colors {
+                    0 => 2,
+                    c if c < 16 => c + 1,
+                    _ => 0,
+                };
+            } else {
+                settings.colors = match settings.colors {
+                    0 => 16,
+                    2 => 0,
+                    c => c - 1,
+                };
+            }
+        }
         _ => {}
     }
 }
@@ -475,7 +504,7 @@ pub fn help(terminal: &mut Term) -> Result<()> {
 }
 
 /// Draw spectrum bars. Bars are pre-normalized by AutoSensitivity (0.0–1.0+ range).
-pub fn draw_spectrum(terminal: &mut Term, bars: &[f32], theme: &Theme, device: &str) -> Result<()> {
+pub fn draw_spectrum(terminal: &mut Term, bars: &[f32], theme: &Theme, device: &str, num_colors: usize) -> Result<()> {
     let theme_name = theme.name;
     let num_bars = bars.len();
     terminal.draw(|frame| {
@@ -486,14 +515,13 @@ pub fn draw_spectrum(terminal: &mut Term, bars: &[f32], theme: &Theme, device: &
 
         let ratatui_bars: Vec<Bar> = bars
             .iter()
-            .enumerate()
-            .map(|(_i, &v)| {
+            .map(|&v| {
                 let normalized = v / max_val;
                 let height = (normalized * 100.0) as u64;
                 Bar::default()
                     .value(height)
                     .text_value(String::new())
-                    .style(Style::default().fg(theme.bar_color(normalized)))
+                    .style(Style::default().fg(theme.bar_color(normalized, num_colors)))
             })
             .collect();
 
@@ -577,6 +605,7 @@ pub fn draw_stereo(
     right_bars: &[f32],
     theme: &Theme,
     device: &str,
+    num_colors: usize,
 ) -> Result<()> {
     let theme_name = theme.name;
     let num_bars = left_bars.len();
@@ -607,7 +636,7 @@ pub fn draw_stereo(
                     let normalized = (v / left_max).clamp(0.0, 1.0);
                     let height = normalized as f64 * half_h;
                     let x = i as f64 * bar_w;
-                    let color = theme.bar_color(normalized);
+                    let color = theme.bar_color(normalized, num_colors);
 
                     // Draw bar as vertical lines
                     let steps = (height * 2.0).max(1.0) as usize;
@@ -628,7 +657,7 @@ pub fn draw_stereo(
                     let normalized = (v / right_max).clamp(0.0, 1.0);
                     let height = normalized as f64 * half_h;
                     let x = i as f64 * bar_w;
-                    let color = theme.bar_color(normalized);
+                    let color = theme.bar_color(normalized, num_colors);
 
                     let steps = (height * 2.0).max(1.0) as usize;
                     for s in 0..steps {
