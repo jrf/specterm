@@ -49,8 +49,8 @@ sonitus --list-devices         # list available audio devices
 
 | | |
 |---|---|
-| ![waveform](waveform.png) | ![oscilloscope](oscilloscope.png) |
-| ![stereo](stereo.png) | |
+| ![spectrum](spectrum.png) | ![waveform](waveform.png) |
+| ![oscilloscope](oscilloscope.png) | ![stereo](stereo.png) |
 
 ## Themes
 
