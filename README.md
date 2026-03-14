@@ -2,6 +2,8 @@
 
 Terminal audio visualizer for macOS. Renders real-time spectrum bars, waveforms, and oscilloscopes from mic input or system audio.
 
+![sonitus](sonitus.png)
+
 ## Install
 
 Requires Rust and (optionally) Swift for system audio capture.

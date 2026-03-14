@@ -66,6 +66,10 @@ fn main() -> Result<()> {
 
     // Start audio capture with default or specified device
     let buffer = audio::new_buffer(analysis::FFT_SIZE);
+    let mut device_name = cli
+        .device
+        .clone()
+        .unwrap_or_else(|| "Default device".to_string());
     let (mut sample_rate, mut capture) =
         start_audio(&buffer, cli.device.as_deref())?;
 
@@ -95,6 +99,7 @@ fn main() -> Result<()> {
                             start_audio(&buffer, new_device.as_deref())?;
                         sample_rate = sr;
                         capture = handle;
+                        device_name = new_device.unwrap_or_else(|| "Default device".to_string());
                         prev_bars = vec![0.0; NUM_BARS];
                     }
                     render::DeviceMenuResult::Quit => break,
@@ -131,14 +136,14 @@ fn main() -> Result<()> {
                 let magnitudes = analysis::spectrum(&samples);
                 let bars = analysis::bin_spectrum(&magnitudes, NUM_BARS, sample_rate);
                 let smoothed = analysis::smooth(&prev_bars, &bars, SMOOTHING_FACTOR);
-                render::draw_spectrum(&mut terminal, &smoothed, current_theme)?;
+                render::draw_spectrum(&mut terminal, &smoothed, current_theme, &device_name)?;
                 prev_bars = smoothed;
             }
             Mode::Wave => {
-                render::draw_wave(&mut terminal, &samples, current_theme)?;
+                render::draw_wave(&mut terminal, &samples, current_theme, &device_name)?;
             }
             Mode::Scope => {
-                render::draw_scope(&mut terminal, &samples, current_theme)?;
+                render::draw_scope(&mut terminal, &samples, current_theme, &device_name)?;
             }
         }
 

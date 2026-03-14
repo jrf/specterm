@@ -308,7 +308,7 @@ pub fn help(terminal: &mut Term) -> Result<()> {
 }
 
 /// Draw spectrum bars.
-pub fn draw_spectrum(terminal: &mut Term, bars: &[f32], theme: &Theme) -> Result<()> {
+pub fn draw_spectrum(terminal: &mut Term, bars: &[f32], theme: &Theme, device: &str) -> Result<()> {
     let theme_name = theme.name;
     terminal.draw(|frame| {
         let area = frame.area();
@@ -333,6 +333,7 @@ pub fn draw_spectrum(terminal: &mut Term, bars: &[f32], theme: &Theme) -> Result
             .block(
                 Block::default()
                     .title(format!(" sonitus — spectrum [{}] ", theme_name))
+                    .title_bottom(format!(" {} | ? help ", device))
                     .borders(Borders::ALL),
             )
             .data(BarGroup::default().bars(&ratatui_bars))
@@ -347,29 +348,32 @@ pub fn draw_spectrum(terminal: &mut Term, bars: &[f32], theme: &Theme) -> Result
 }
 
 /// Draw waveform.
-pub fn draw_wave(terminal: &mut Term, samples: &[f32], theme: &Theme) -> Result<()> {
+pub fn draw_wave(terminal: &mut Term, samples: &[f32], theme: &Theme, device: &str) -> Result<()> {
     let color = theme.wave_color;
-    draw_wave_inner(terminal, samples, " sonitus — waveform ", color)
+    let title = " sonitus — waveform ";
+    let bottom = format!(" {} | ? help ", device);
+    draw_wave_inner(terminal, samples, title, &bottom, color)
 }
 
 /// Draw oscilloscope (zero-crossing triggered waveform).
-pub fn draw_scope(terminal: &mut Term, samples: &[f32], theme: &Theme) -> Result<()> {
+pub fn draw_scope(terminal: &mut Term, samples: &[f32], theme: &Theme, device: &str) -> Result<()> {
     let trigger_offset = samples
         .windows(2)
         .position(|w| w[0] <= 0.0 && w[1] > 0.0)
         .unwrap_or(0);
 
     let triggered = &samples[trigger_offset..];
-    draw_wave_inner(terminal, triggered, " sonitus — oscilloscope ", theme.scope_color)
+    let bottom = format!(" {} | ? help ", device);
+    draw_wave_inner(terminal, triggered, " sonitus — oscilloscope ", &bottom, theme.scope_color)
 }
 
-fn draw_wave_inner(terminal: &mut Term, samples: &[f32], title: &str, color: Color) -> Result<()> {
+fn draw_wave_inner(terminal: &mut Term, samples: &[f32], title: &str, bottom: &str, color: Color) -> Result<()> {
     terminal.draw(|frame| {
         let area = frame.area();
         let inner = Rect::new(area.x + 1, area.y + 1, area.width.saturating_sub(2), area.height.saturating_sub(2));
 
         let canvas = Canvas::default()
-            .block(Block::default().title(title).borders(Borders::ALL))
+            .block(Block::default().title(title).title_bottom(bottom).borders(Borders::ALL))
             .x_bounds([0.0, inner.width as f64])
             .y_bounds([-1.0, 1.0])
             .paint(|ctx| {
