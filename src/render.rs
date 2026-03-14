@@ -704,7 +704,11 @@ pub fn draw_stereo(
             }
         }
 
-        // Right channel: bars grow downward from center using full blocks
+        // Right channel: bars grow downward from center.
+        // Full cells use █. The tip cell uses ▀ (upper half block) for half-cell
+        // precision — we can't use the full ▁▂▃▄▅▆▇ set for downward bars because
+        // those fill from the bottom, and without knowing the terminal background
+        // color we can't invert them cleanly.
         let lower_h = inner.height - half_h - 1; // -1 for center line
         for (i, &v) in right_bars.iter().enumerate() {
             let normalized = (v / right_max).clamp(0.0, 1.0);
@@ -715,24 +719,29 @@ pub fn draw_stereo(
             };
             let color = theme.bar_color(color_val);
 
-            let filled_cells = (normalized * lower_h as f32) as usize;
+            // Height in half-cells (2x resolution via ▀)
+            let halves = (normalized * lower_h as f32 * 2.0) as usize;
+            let full_cells = halves / 2;
+            let has_half = halves % 2 == 1;
 
             let x_start = inner.x + (i * bar_w) as u16;
             let x_end = (x_start + bar_w as u16).min(inner.x + inner.width);
 
-            // Draw from center downward
             for row in 0..lower_h {
                 let y = center_y + 1 + row;
-                let ch = if (row as usize) < filled_cells {
-                    BLOCK_CHARS[8]
-                } else {
-                    ' '
-                };
 
-                for x in x_start..x_end {
-                    let cell = &mut buf[(x, y)];
-                    cell.set_char(ch);
-                    if ch != ' ' {
+                if (row as usize) < full_cells {
+                    for x in x_start..x_end {
+                        let cell = &mut buf[(x, y)];
+                        cell.set_char(BLOCK_CHARS[8]);
+                        cell.set_fg(color);
+                    }
+                } else if (row as usize) == full_cells && has_half {
+                    // Tip: ▀ (upper half block) — top half is fg (bar color),
+                    // bottom half inherits terminal background naturally.
+                    for x in x_start..x_end {
+                        let cell = &mut buf[(x, y)];
+                        cell.set_char('▀');
                         cell.set_fg(color);
                     }
                 }
