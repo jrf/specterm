@@ -14,10 +14,14 @@ Uses `just` as the task runner:
 - `just release` — release build
 - `just install` — build release and install both binaries to `~/.cargo/bin`
 - `just run [ARGS]` — debug run (e.g. `just run --mode wave --theme fire`)
+- `just run-release [ARGS]` — release run
 - `just lint` — `cargo clippy -- -D warnings`
 - `just fmt` — `cargo fmt`
+- `just fmt-check` — check formatting without modifying
 - `just test` — `cargo test`
 - `just clean` — clean both Rust and Swift build artifacts
+
+Run a single test: `cargo test test_name`
 
 The Swift tap binary must be built separately (`cd tap && swift build`) or via `just build`/`just install`.
 
@@ -31,9 +35,11 @@ Two-process design: the Rust binary handles all visualization, the Swift binary 
 
 **Key modules**:
 - `audio.rs` — Two capture paths: `start_capture` (cpal device input) and `start_tap` (spawns `sonitus-tap` subprocess, reads raw f32 from its stdout). `CaptureHandle` enum keeps the stream/child alive via RAII.
-- `analysis.rs` — Hann-windowed FFT (`FFT_SIZE = 2048`), logarithmic frequency binning, exponential frame smoothing, monstercat envelope smoothing, noise gate, and `AutoSensitivity` (auto-gain normalization).
+- `analysis.rs` — Hann-windowed FFT (`FFT_SIZE = 8192`), logarithmic frequency binning, exponential frame smoothing, monstercat envelope smoothing, noise gate, `Gravity` (frame-rate independent bar fall-off), and `AutoSensitivity` (auto-gain normalization).
 - `render.rs` — All ratatui terminal UI: spectrum (BarChart), waveform/oscilloscope (Canvas with line segments), stereo (Canvas with mirrored bars), plus interactive menus (device, theme, settings, help).
 - `theme.rs` — Static `THEMES` array of gradient color definitions.
 - `config.rs` — Persists settings to `~/.config/sonitus/config.toml` via serde/toml. Settings changed at runtime (theme, smoothing, etc.) are saved automatically.
 
 **System audio** (`tap/Sources/main.swift`): Uses ScreenCaptureKit to capture system audio output, mixes to mono f32, writes raw bytes to stdout. Requires macOS 13+ and Screen Recording permission.
+
+**Config persistence**: Runtime settings auto-save to `~/.config/sonitus/config.toml`. CLI args override saved config. Defaults: 60fps, 64 bars, 20–20000Hz range, 0.5 smoothing.
