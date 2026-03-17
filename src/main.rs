@@ -120,6 +120,7 @@ fn start_audio(
     stereo: &audio::StereoPair,
     device: Option<&str>,
     last_write: &audio::LastWriteTime,
+    now_playing: &audio::NowPlaying,
 ) -> Result<(u32, audio::CaptureHandle)> {
     if device.is_none()
         || device == Some(audio::SYSTEM_AUDIO_LABEL)
@@ -130,8 +131,11 @@ fn start_audio(
             (stereo.0.clone(), stereo.1.clone()),
             DEFAULT_SAMPLE_RATE,
             last_write,
+            now_playing.clone(),
         )
     } else {
+        // Clear now-playing when switching to mic input
+        *now_playing.lock().unwrap() = None;
         audio::start_capture(
             mono_buf.clone(),
             (stereo.0.clone(), stereo.1.clone()),
@@ -219,12 +223,13 @@ fn main() -> Result<()> {
     let mono_buf = audio::new_buffer(analysis::FFT_SIZE);
     let stereo = audio::new_stereo_buffers(analysis::FFT_SIZE);
     let last_write = audio::LastWriteTime::new();
+    let now_playing = audio::new_now_playing();
     let mut device_name = cli
         .device
         .clone()
         .unwrap_or_else(|| audio::SYSTEM_AUDIO_LABEL.to_string());
     let (mut sample_rate, mut capture) =
-        start_audio(&mono_buf, &stereo, cli.device.as_deref(), &last_write)?;
+        start_audio(&mono_buf, &stereo, cli.device.as_deref(), &last_write, &now_playing)?;
 
     // Init terminal
     let mut terminal = render::init()?;
@@ -313,7 +318,7 @@ fn main() -> Result<()> {
                     render::DeviceMenuResult::Selected(new_device) => {
                         drop(capture);
                         let (sr, handle) =
-                            start_audio(&mono_buf, &stereo, new_device.as_deref(), &last_write)?;
+                            start_audio(&mono_buf, &stereo, new_device.as_deref(), &last_write, &now_playing)?;
                         sample_rate = sr;
                         capture = handle;
                         device_name =
@@ -402,6 +407,12 @@ fn main() -> Result<()> {
             }
         }
 
+        // Build status line: device name + now playing track (if available)
+        let status = match now_playing.lock().unwrap().as_deref() {
+            Some(track) => format!("{} | {}", device_name, track),
+            None => device_name.clone(),
+        };
+
         match mode {
             Mode::Spectrum => {
                 let samples = {
@@ -424,7 +435,7 @@ fn main() -> Result<()> {
                 // Store prev_bars before gravity so gravity doesn't feed back into smoothing
                 prev_bars = smoothed.clone();
                 gravity.apply(&mut smoothed, dt);
-                render::draw_spectrum(&mut terminal, &smoothed, current_theme, &device_name, settings.gradient_by_position, actual_fps, settings.bar_width, settings.bar_spacing)?;
+                render::draw_spectrum(&mut terminal, &smoothed, current_theme, &status, settings.gradient_by_position, actual_fps, settings.bar_width, settings.bar_spacing)?;
             }
             Mode::Stereo => {
                 let left_samples = {
@@ -471,7 +482,7 @@ fn main() -> Result<()> {
                 gravity_r.apply(&mut smooth_r, dt);
 
                 render::draw_stereo(
-                    &mut terminal, &smooth_l, &smooth_r, current_theme, &device_name, settings.gradient_by_position, actual_fps, settings.bar_width, settings.bar_spacing,
+                    &mut terminal, &smooth_l, &smooth_r, current_theme, &status, settings.gradient_by_position, actual_fps, settings.bar_width, settings.bar_spacing,
                 )?;
             }
             Mode::Wave => {
@@ -479,14 +490,14 @@ fn main() -> Result<()> {
                     let buf = mono_buf.lock().unwrap();
                     buf.clone()
                 };
-                render::draw_wave(&mut terminal, &samples, current_theme, &device_name, actual_fps)?;
+                render::draw_wave(&mut terminal, &samples, current_theme, &status, actual_fps)?;
             }
             Mode::Scope => {
                 let samples = {
                     let buf = mono_buf.lock().unwrap();
                     buf.clone()
                 };
-                render::draw_scope(&mut terminal, &samples, current_theme, &device_name, actual_fps)?;
+                render::draw_scope(&mut terminal, &samples, current_theme, &status, actual_fps)?;
             }
         }
 

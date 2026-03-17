@@ -16,6 +16,13 @@ pub type SampleBuffer = Arc<Mutex<Vec<f32>>>;
 /// Stereo sample buffers (left, right).
 pub type StereoPair = (SampleBuffer, SampleBuffer);
 
+/// Shared now-playing track info from the tap subprocess.
+pub type NowPlaying = Arc<Mutex<Option<String>>>;
+
+pub fn new_now_playing() -> NowPlaying {
+    Arc::new(Mutex::new(None))
+}
+
 /// Tracks when samples were last written. If no new data arrives for a while,
 /// the render thread can treat the buffer as silence instead of showing stale data.
 pub struct LastWriteTime(Arc<Mutex<Instant>>);
@@ -152,6 +159,7 @@ pub fn start_tap(
     stereo: StereoPair,
     sample_rate: u32,
     last_write: &LastWriteTime,
+    now_playing: NowPlaying,
 ) -> Result<(u32, CaptureHandle)> {
     let tap_bin = find_tap_binary();
 
@@ -172,11 +180,18 @@ pub fn start_tap(
     let stderr = child.stderr.take();
 
     if let Some(stderr) = stderr {
+        let np = now_playing;
         thread::spawn(move || {
             let reader = BufReader::new(stderr);
             for line in reader.lines() {
-                if line.is_err() {
-                    break;
+                match line {
+                    Ok(line) => {
+                        if let Some(track) = line.strip_prefix("TRACK:") {
+                            let track = track.trim().to_string();
+                            *np.lock().unwrap() = if track.is_empty() { None } else { Some(track) };
+                        }
+                    }
+                    Err(_) => break,
                 }
             }
         });
