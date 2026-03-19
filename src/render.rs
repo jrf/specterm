@@ -120,8 +120,7 @@ pub fn device_menu(terminal: &mut Term, devices: &[String]) -> Result<DeviceMenu
                 if i == selected {
                     item.style(
                         Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::Cyan)
+                            .bg(Color::Rgb(40, 40, 40))
                             .add_modifier(Modifier::BOLD),
                     )
                 } else {
