@@ -444,9 +444,9 @@ fn adjust_setting(settings: &mut Settings, idx: usize, direction: i32, num_theme
             settings.smoothing = (settings.smoothing + direction as f32 * 0.05).clamp(0.0, 0.99);
         }
         3 => {
-            // Noise floor: step by 0.002
+            // Noise floor: step by 0.001
             settings.noise_floor =
-                (settings.noise_floor + direction as f32 * 0.002).clamp(0.0, 0.05);
+                (settings.noise_floor + direction as f32 * 0.001).clamp(0.0, 0.05);
         }
         4 => {
             // Gradient mode: toggle
