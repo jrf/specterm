@@ -370,7 +370,7 @@ fn main() -> Result<()> {
                 continue;
             }
             render::Action::MoreBars => {
-                desired_bars = (desired_bars + BAR_STEP).min(MAX_BARS);
+                desired_bars = (num_bars + BAR_STEP).min(MAX_BARS);
                 settings.bars = desired_bars;
                 num_bars = desired_bars;
                 prev_bars = vec![0.0; num_bars];
@@ -380,7 +380,7 @@ fn main() -> Result<()> {
                 continue;
             }
             render::Action::FewerBars => {
-                desired_bars = (desired_bars.saturating_sub(BAR_STEP)).max(MIN_BARS);
+                desired_bars = (num_bars.saturating_sub(BAR_STEP)).max(MIN_BARS);
                 settings.bars = desired_bars;
                 num_bars = desired_bars;
                 prev_bars = vec![0.0; num_bars];

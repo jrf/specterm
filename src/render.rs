@@ -3,7 +3,7 @@
 use crate::theme::Theme;
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     backend::CrosstermBackend,
     layout::Rect,
@@ -62,6 +62,9 @@ pub enum Action {
 pub fn poll_input(timeout: Duration) -> Result<Action> {
     if event::poll(timeout)? {
         if let Event::Key(key) = event::read()? {
+            if key.kind != KeyEventKind::Press {
+                return Ok(Action::None);
+            }
             if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
                 || (key.code == KeyCode::Char('c')
                     && key.modifiers.contains(KeyModifiers::CONTROL))
@@ -136,6 +139,9 @@ pub fn device_menu(terminal: &mut Term, devices: &[String]) -> Result<DeviceMenu
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
                 match key.code {
                     KeyCode::Up | KeyCode::Char('k') => {
                         selected = selected.saturating_sub(1);
@@ -223,6 +229,9 @@ pub fn theme_menu(terminal: &mut Term, themes: &[Theme], current_idx: usize) -> 
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
                 match key.code {
                     KeyCode::Up | KeyCode::Char('k') => {
                         selected = selected.saturating_sub(1);
@@ -373,6 +382,9 @@ pub fn settings_menu(terminal: &mut Term, settings: &Settings, themes: &[Theme])
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
                 match key.code {
                     KeyCode::Up | KeyCode::Char('k') => {
                         selected = selected.saturating_sub(1);
