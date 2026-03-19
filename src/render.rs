@@ -45,29 +45,11 @@ pub fn cleanup(terminal: &mut Term) -> Result<()> {
     Ok(())
 }
 
-/// Poll for a key press without mapping to an action.
-/// Returns the key code if a key was pressed, None otherwise.
-pub fn poll_key(timeout: Duration) -> Result<Option<KeyCode>> {
-    if event::poll(timeout)? {
-        if let Event::Key(key) = event::read()? {
-            if key.kind == KeyEventKind::Press {
-                // Handle Ctrl+C as quit
-                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                    return Ok(Some(KeyCode::Char('q')));
-                }
-                return Ok(Some(key.code));
-            }
-        }
-    }
-    Ok(None)
-}
-
 /// Action returned from input polling.
 pub enum Action {
     None,
     Quit,
     SelectDevice,
-    SelectTheme,
     Settings,
     Help,
     CycleMode,
@@ -92,7 +74,6 @@ pub fn poll_input(timeout: Duration) -> Result<Action> {
             }
             match key.code {
                 KeyCode::Char('d') => return Ok(Action::SelectDevice),
-                KeyCode::Char('t') => return Ok(Action::SelectTheme),
                 KeyCode::Char('s') => return Ok(Action::Settings),
                 KeyCode::Char('m') => return Ok(Action::CycleMode),
                 KeyCode::Char('?') => return Ok(Action::Help),
@@ -138,6 +119,7 @@ pub fn device_menu(terminal: &mut Term, devices: &[String], theme: &Theme) -> Re
                 if i == selected {
                     item.style(
                         Style::default()
+                            .fg(Color::White)
                             .bg(Color::Rgb(40, 40, 40))
                             .add_modifier(Modifier::BOLD),
                     )
@@ -153,7 +135,7 @@ pub fn device_menu(terminal: &mut Term, devices: &[String], theme: &Theme) -> Re
                     .title(Span::styled(" termwave — select audio device ", Style::default().fg(border_color)))
                     .title_bottom(Span::styled(
                         " ↑/↓ navigate  Enter select  Esc back  q quit ",
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(border_color),
                     ))
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(border_color))
@@ -202,87 +184,6 @@ pub fn device_menu(terminal: &mut Term, devices: &[String], theme: &Theme) -> Re
     }
 }
 
-/// State for the theme picker overlay (rendered alongside the visualizer).
-pub struct ThemePicker {
-    pub selected: usize,
-    pub total: usize,
-}
-
-impl ThemePicker {
-    pub fn new(current_idx: usize, total: usize) -> Self {
-        Self { selected: current_idx, total }
-    }
-
-    pub fn up(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
-    }
-
-    pub fn down(&mut self) {
-        if self.selected + 1 < self.total {
-            self.selected += 1;
-        }
-    }
-}
-
-/// Draw theme picker overlay on the right half of the screen.
-/// Call this after the main visualizer draw in the same frame.
-pub fn draw_theme_overlay(terminal: &mut Term, themes: &[Theme], picker: &ThemePicker) -> Result<()> {
-    terminal.draw(|frame| {
-        let area = frame.area();
-        // Right half of the screen
-        let overlay_width = area.width / 2;
-        let overlay = Rect::new(
-            area.width - overlay_width,
-            0,
-            overlay_width,
-            area.height,
-        );
-
-        // Clear the overlay area
-        frame.render_widget(ratatui::widgets::Clear, overlay);
-
-        let items: Vec<ListItem> = themes
-            .iter()
-            .enumerate()
-            .map(|(i, theme)| {
-                let mut spans: Vec<Span> = vec![Span::raw("  ")];
-                for &color in theme.gradient {
-                    spans.push(Span::styled("██", Style::default().fg(color)));
-                }
-                spans.push(Span::raw(format!("  {}", theme.name)));
-
-                let item = ListItem::new(Line::from(spans));
-                if i == picker.selected {
-                    item.style(
-                        Style::default()
-                            .bg(Color::Rgb(40, 40, 40))
-                            .add_modifier(Modifier::BOLD),
-                    )
-                } else {
-                    item
-                }
-            })
-            .collect();
-
-        let sel_theme = &themes[picker.selected];
-        let border_color = sel_theme.gradient[sel_theme.gradient.len() / 2];
-        let list = List::new(items).block(
-            Block::default()
-                .title(Span::styled(" select theme ", Style::default().fg(border_color)))
-                .title_bottom(Span::styled(
-                    " ↑/↓ navigate  Enter select  Esc back ",
-                    Style::default().fg(Color::DarkGray),
-                ))
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(border_color))
-                .padding(Padding::vertical(1)),
-        );
-
-        frame.render_widget(list, overlay);
-    })?;
-    Ok(())
-}
-
 /// Mutable settings that can be changed at runtime.
 #[derive(Clone)]
 pub struct Settings {
@@ -300,156 +201,184 @@ pub struct Settings {
     pub sensitivity: u32,
 }
 
-/// Show settings menu. Returns updated settings.
-pub fn settings_menu(terminal: &mut Term, settings: &Settings, themes: &[Theme]) -> Result<Option<Settings>> {
-    let mut current = settings.clone();
-    let mut selected: usize = 0;
-    let num_items = 8;
+/// Non-blocking settings overlay state.
+pub struct SettingsState {
+    pub selected: usize,
+    pub num_items: usize,
+}
 
-    loop {
-        let theme = &themes[current.theme_idx.min(themes.len() - 1)];
-        let accent = theme.wave_color;
-        let border_color = theme.gradient[theme.gradient.len() / 2];
+/// Result of handling a key in the settings overlay.
+pub enum SettingsAction {
+    /// Keep the overlay open.
+    None,
+    /// Close the overlay (Esc/s).
+    Close,
+    /// Quit the application.
+    Quit,
+}
 
-        terminal.draw(|frame| {
-            let area = frame.area();
+impl SettingsState {
+    pub fn new() -> Self {
+        Self { selected: 0, num_items: 8 }
+    }
 
-            let smoothing_bar = slider_bar(current.smoothing, 0.0, 0.99, 20);
-            let noise_bar = slider_bar(current.noise_floor, 0.0, 0.05, 20);
-
-            // Theme swatch
-            let mut theme_spans: Vec<Span> = vec![Span::styled(
-                format!("  {:16}", "Theme"),
-                Style::default().fg(accent),
-            )];
-            for &color in theme.gradient {
-                theme_spans.push(Span::styled("██", Style::default().fg(color)));
+    /// Handle a key event. Mutates settings in place, returns what to do.
+    pub fn handle_key(&mut self, key: KeyCode, settings: &mut Settings, num_themes: usize) -> SettingsAction {
+        match key {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.selected = self.selected.saturating_sub(1);
             }
-            theme_spans.push(Span::raw(format!("  {}", theme.name)));
-
-            let items: Vec<ListItem> = vec![
-                ListItem::new(Line::from(theme_spans)),
-                ListItem::new(Line::from(vec![
-                    Span::styled(
-                        format!("  {:16}", "Smoothing"),
-                        Style::default().fg(accent),
-                    ),
-                    Span::raw(format!("{} {:.2}", smoothing_bar, current.smoothing)),
-                ])),
-                ListItem::new(Line::from(vec![
-                    Span::styled(
-                        format!("  {:16}", "Monstercat"),
-                        Style::default().fg(accent),
-                    ),
-                    Span::raw(if current.monstercat { "[ON]" } else { "[OFF]" }),
-                ])),
-                ListItem::new(Line::from(vec![
-                    Span::styled(
-                        format!("  {:16}", "Noise floor"),
-                        Style::default().fg(accent),
-                    ),
-                    Span::raw(format!("{} {:.4}", noise_bar, current.noise_floor)),
-                ])),
-                ListItem::new(Line::from(vec![
-                    Span::styled(
-                        format!("  {:16}", "Gradient"),
-                        Style::default().fg(accent),
-                    ),
-                    Span::raw(if current.gradient_by_position { "[position]" } else { "[amplitude]" }),
-                ])),
-                ListItem::new(Line::from(vec![
-                    Span::styled(
-                        format!("  {:16}", "Bar width"),
-                        Style::default().fg(accent),
-                    ),
-                    Span::raw(format!("{}", current.bar_width)),
-                ])),
-                ListItem::new(Line::from(vec![
-                    Span::styled(
-                        format!("  {:16}", "Bar spacing"),
-                        Style::default().fg(accent),
-                    ),
-                    Span::raw(format!("{}", current.bar_spacing)),
-                ])),
-                ListItem::new(Line::from(vec![
-                    Span::styled(
-                        format!("  {:16}", "Sensitivity"),
-                        Style::default().fg(accent),
-                    ),
-                    Span::raw(format!("{}%", current.sensitivity)),
-                ])),
-            ]
-            .into_iter()
-            .enumerate()
-            .map(|(i, item)| {
-                if i == selected {
-                    item.style(
-                        Style::default()
-                            .bg(Color::Rgb(40, 40, 40))
-                            .add_modifier(Modifier::BOLD),
-                    )
-                } else {
-                    item
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.selected + 1 < self.num_items {
+                    self.selected += 1;
                 }
-            })
-            .collect();
-
-            let list = List::new(items).block(
-                Block::default()
-                    .title(Span::styled(" termwave — settings ", Style::default().fg(border_color)))
-                    .title_bottom(Span::styled(
-                        " ↑/↓ navigate  ←/→ adjust  Enter/Space toggle  Esc back ",
-                        Style::default().fg(Color::DarkGray),
-                    ))
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(border_color))
-                    .padding(Padding::new(2, 2, 1, 1)),
-            );
-
-            frame.render_widget(list, area);
-        })?;
-
-        if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                adjust_setting(settings, self.selected, -1, num_themes);
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                adjust_setting(settings, self.selected, 1, num_themes);
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                if self.selected == 2 {
+                    settings.monstercat = !settings.monstercat;
+                } else if self.selected == 4 {
+                    settings.gradient_by_position = !settings.gradient_by_position;
                 }
-                match key.code {
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        selected = selected.saturating_sub(1);
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        if selected + 1 < num_items {
-                            selected += 1;
-                        }
-                    }
-                    KeyCode::Left | KeyCode::Char('h') => {
-                        adjust_setting(&mut current, selected, -1, themes.len());
-                    }
-                    KeyCode::Right | KeyCode::Char('l') => {
-                        adjust_setting(&mut current, selected, 1, themes.len());
-                    }
-                    KeyCode::Enter | KeyCode::Char(' ') => {
-                        if selected == 2 {
-                            current.monstercat = !current.monstercat;
-                        } else if selected == 4 {
-                            current.gradient_by_position = !current.gradient_by_position;
-                        }
-                    }
-                    KeyCode::Esc | KeyCode::Char('s') => {
-                        return Ok(Some(current));
-                    }
-                    KeyCode::Char('q') => {
-                        return Ok(None);
-                    }
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        return Ok(None);
-                    }
-                    _ => {}
+            }
+            KeyCode::Esc | KeyCode::Char('s') => return SettingsAction::Close,
+            KeyCode::Char('q') => return SettingsAction::Quit,
+            _ => {}
+        }
+        SettingsAction::None
+    }
+}
+
+/// Render settings overlay (centered, 50% of terminal) on top of the current frame.
+pub fn render_settings(frame: &mut ratatui::Frame, settings: &Settings, themes: &[Theme], state: &SettingsState) {
+    let full = frame.area();
+    let area = Rect::new(
+        full.width / 4,
+        full.height / 4,
+        full.width / 2,
+        full.height / 2,
+    );
+
+    frame.render_widget(ratatui::widgets::Clear, area);
+
+    let theme = &themes[settings.theme_idx.min(themes.len() - 1)];
+    let accent = theme.wave_color;
+    let border_color = theme.gradient[theme.gradient.len() / 2];
+
+    let smoothing_bar = slider_bar(settings.smoothing, 0.0, 0.99, 20);
+    let noise_bar = slider_bar(settings.noise_floor, 0.0, 0.05, 20);
+
+    // Theme swatch
+    let mut theme_spans: Vec<Span> = vec![Span::styled(
+        format!("  {:16}", "Theme"),
+        Style::default().fg(accent),
+    )];
+    for &color in theme.gradient {
+        theme_spans.push(Span::styled("██", Style::default().fg(color)));
+    }
+    theme_spans.push(Span::raw(format!("  {}", theme.name)));
+
+    let items: Vec<ListItem> = vec![
+        ListItem::new(Line::from(theme_spans)),
+        ListItem::new(Line::from(vec![
+            Span::styled(
+                format!("  {:16}", "Smoothing"),
+                Style::default().fg(accent),
+            ),
+            Span::raw(format!("{} {:.2}", smoothing_bar, settings.smoothing)),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled(
+                format!("  {:16}", "Monstercat"),
+                Style::default().fg(accent),
+            ),
+            Span::raw(if settings.monstercat { "[ON]" } else { "[OFF]" }),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled(
+                format!("  {:16}", "Noise floor"),
+                Style::default().fg(accent),
+            ),
+            Span::raw(format!("{} {:.4}", noise_bar, settings.noise_floor)),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled(
+                format!("  {:16}", "Gradient"),
+                Style::default().fg(accent),
+            ),
+            Span::raw(if settings.gradient_by_position { "[position]" } else { "[amplitude]" }),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled(
+                format!("  {:16}", "Bar width"),
+                Style::default().fg(accent),
+            ),
+            Span::raw(format!("{}", settings.bar_width)),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled(
+                format!("  {:16}", "Bar spacing"),
+                Style::default().fg(accent),
+            ),
+            Span::raw(format!("{}", settings.bar_spacing)),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled(
+                format!("  {:16}", "Sensitivity"),
+                Style::default().fg(accent),
+            ),
+            Span::raw(format!("{}%", settings.sensitivity)),
+        ])),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(i, item)| {
+        if i == state.selected {
+            item.style(
+                Style::default()
+                    .fg(Color::White)
+                    .bg(Color::Rgb(40, 40, 40))
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            item
+        }
+    })
+    .collect();
+
+    let list = List::new(items).block(
+        Block::default()
+            .title(Span::styled(" termwave — settings ", Style::default().fg(border_color)))
+            .title_bottom(Span::styled(
+                " ↑/↓ navigate  ←/→ adjust  Enter/Space toggle  Esc back ",
+                Style::default().fg(border_color),
+            ))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(border_color))
+            .padding(Padding::new(2, 2, 1, 1)),
+    );
+
+    frame.render_widget(list, area);
+}
+
+/// Poll for a key press without mapping to an action.
+pub fn poll_key(timeout: Duration) -> Result<Option<KeyCode>> {
+    if event::poll(timeout)? {
+        if let Event::Key(key) = event::read()? {
+            if key.kind == KeyEventKind::Press {
+                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    return Ok(Some(KeyCode::Char('q')));
                 }
+                return Ok(Some(key.code));
             }
         }
     }
+    Ok(None)
 }
 
 fn adjust_setting(settings: &mut Settings, idx: usize, direction: i32, num_themes: usize) {
@@ -508,8 +437,7 @@ pub fn help(terminal: &mut Term, theme: &Theme) -> Result<()> {
     let bindings = [
         ("?", "Show this help"),
         ("d", "Select audio device"),
-        ("t", "Select color theme"),
-        ("s", "Settings (smoothing, noise, bar width/spacing)"),
+        ("s", "Settings (theme, smoothing, noise, bar width/spacing)"),
         ("m", "Cycle visualization mode"),
         ("Up / Down", "Increase / decrease sensitivity"),
         ("Right / Left", "More / fewer bars"),
@@ -567,7 +495,7 @@ pub fn help(terminal: &mut Term, theme: &Theme) -> Result<()> {
                 .title(Span::styled(" termwave — help ", Style::default().fg(border_color)))
                 .title_bottom(Span::styled(
                     " press any key to close ",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(border_color),
                 ))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(border_color))
@@ -590,8 +518,8 @@ pub fn help(terminal: &mut Term, theme: &Theme) -> Result<()> {
 /// Draw spectrum bars using Unicode block elements (▁▂▃▄▅▆▇█) for 1/8th-cell
 /// vertical resolution.
 #[allow(clippy::too_many_arguments)]
-pub fn draw_spectrum(
-    terminal: &mut Term,
+pub fn render_spectrum(
+    frame: &mut ratatui::Frame,
     bars: &[f32],
     theme: &Theme,
     device: &str,
@@ -600,7 +528,7 @@ pub fn draw_spectrum(
     bar_width: usize,
     bar_spacing: usize,
     sensitivity: u32,
-) -> Result<()> {
+) {
     let theme_name = theme.name;
     let num_bars = bars.len();
     let fps_str = actual_fps.map(|f| format!(" {}fps", f)).unwrap_or_default();
@@ -608,12 +536,14 @@ pub fn draw_spectrum(
     let title = format!(" termwave — spectrum [{}] ({} bars{}){} ", theme_name, num_bars, sens_str, fps_str);
     let bottom = format!(" {} | ? help ", device);
 
-    terminal.draw(|frame| {
+    {
         let area = frame.area();
+        let border_color = theme.gradient[theme.gradient.len() / 2];
         let border = Block::default()
-            .title(title.as_str())
-            .title_bottom(bottom.as_str())
-            .borders(Borders::ALL);
+            .title(Span::styled(title.as_str(), Style::default().fg(border_color)))
+            .title_bottom(Span::styled(bottom.as_str(), Style::default().fg(border_color)))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(border_color));
         let inner = border.inner(area);
         frame.render_widget(border, area);
 
@@ -669,74 +599,74 @@ pub fn draw_spectrum(
                 }
             }
         }
-    })?;
-
-    Ok(())
+    }
 }
 
 /// Draw waveform.
-pub fn draw_wave(terminal: &mut Term, samples: &[f32], theme: &Theme, device: &str, actual_fps: Option<u32>) -> Result<()> {
+pub fn render_wave(frame: &mut ratatui::Frame, samples: &[f32], theme: &Theme, device: &str, actual_fps: Option<u32>) {
     let color = theme.wave_color;
+    let border_color = theme.gradient[theme.gradient.len() / 2];
     let fps_str = actual_fps.map(|f| format!(" {}fps", f)).unwrap_or_default();
     let title = format!(" termwave — waveform{} ", fps_str);
     let bottom = format!(" {} | ? help ", device);
-    draw_wave_inner(terminal, samples, &title, &bottom, color)
+    render_wave_inner(frame, samples, &title, &bottom, color, border_color);
 }
 
 /// Draw oscilloscope (zero-crossing triggered waveform).
-pub fn draw_scope(terminal: &mut Term, samples: &[f32], theme: &Theme, device: &str, actual_fps: Option<u32>) -> Result<()> {
+pub fn render_scope(frame: &mut ratatui::Frame, samples: &[f32], theme: &Theme, device: &str, actual_fps: Option<u32>) {
     let trigger_offset = samples
         .windows(2)
         .position(|w| w[0] <= 0.0 && w[1] > 0.0)
         .unwrap_or(0);
 
     let triggered = &samples[trigger_offset..];
+    let border_color = theme.gradient[theme.gradient.len() / 2];
     let fps_str = actual_fps.map(|f| format!(" {}fps", f)).unwrap_or_default();
     let title = format!(" termwave — oscilloscope{} ", fps_str);
     let bottom = format!(" {} | ? help ", device);
-    draw_wave_inner(terminal, triggered, &title, &bottom, theme.scope_color)
+    render_wave_inner(frame, triggered, &title, &bottom, theme.scope_color, border_color);
 }
 
-fn draw_wave_inner(terminal: &mut Term, samples: &[f32], title: &str, bottom: &str, color: Color) -> Result<()> {
-    terminal.draw(|frame| {
-        let area = frame.area();
-        let inner = Rect::new(area.x + 1, area.y + 1, area.width.saturating_sub(2), area.height.saturating_sub(2));
+fn render_wave_inner(frame: &mut ratatui::Frame, samples: &[f32], title: &str, bottom: &str, color: Color, border_color: Color) {
+    let area = frame.area();
+    let inner = Rect::new(area.x + 1, area.y + 1, area.width.saturating_sub(2), area.height.saturating_sub(2));
 
-        let canvas = Canvas::default()
-            .block(Block::default().title(title).title_bottom(bottom).borders(Borders::ALL))
-            .x_bounds([0.0, inner.width as f64])
-            .y_bounds([-1.0, 1.0])
-            .paint(|ctx| {
-                if samples.len() < 2 {
-                    return;
-                }
-                let step = samples.len() as f64 / inner.width as f64;
-                for i in 0..inner.width.saturating_sub(1) as usize {
-                    let idx0 = (i as f64 * step) as usize;
-                    let idx1 = ((i + 1) as f64 * step) as usize;
-                    let y0 = samples.get(idx0).copied().unwrap_or(0.0) as f64;
-                    let y1 = samples.get(idx1).copied().unwrap_or(0.0) as f64;
-                    ctx.draw(&CanvasLine {
-                        x1: i as f64,
-                        y1: y0,
-                        x2: (i + 1) as f64,
-                        y2: y1,
-                        color,
-                    });
-                }
-            });
+    let canvas = Canvas::default()
+        .block(Block::default()
+            .title(Span::styled(title, Style::default().fg(border_color)))
+            .title_bottom(Span::styled(bottom, Style::default().fg(border_color)))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(border_color)))
+        .x_bounds([0.0, inner.width as f64])
+        .y_bounds([-1.0, 1.0])
+        .paint(|ctx| {
+            if samples.len() < 2 {
+                return;
+            }
+            let step = samples.len() as f64 / inner.width as f64;
+            for i in 0..inner.width.saturating_sub(1) as usize {
+                let idx0 = (i as f64 * step) as usize;
+                let idx1 = ((i + 1) as f64 * step) as usize;
+                let y0 = samples.get(idx0).copied().unwrap_or(0.0) as f64;
+                let y1 = samples.get(idx1).copied().unwrap_or(0.0) as f64;
+                ctx.draw(&CanvasLine {
+                    x1: i as f64,
+                    y1: y0,
+                    x2: (i + 1) as f64,
+                    y2: y1,
+                    color,
+                });
+            }
+        });
 
-        frame.render_widget(canvas, area);
-    })?;
-
-    Ok(())
+    frame.render_widget(canvas, area);
 }
 
 /// Draw stereo spectrum: left channel bars grow up from center, right channel grows down.
 /// Uses Unicode block elements for the upper half (▁▂▃▄▅▆▇█) and full blocks for the lower half.
 #[allow(clippy::too_many_arguments)]
-pub fn draw_stereo(
-    terminal: &mut Term,
+pub fn render_stereo(
+    frame: &mut ratatui::Frame,
     left_bars: &[f32],
     right_bars: &[f32],
     theme: &Theme,
@@ -746,7 +676,7 @@ pub fn draw_stereo(
     bar_width: usize,
     bar_spacing: usize,
     sensitivity: u32,
-) -> Result<()> {
+) {
     let theme_name = theme.name;
     let num_bars = left_bars.len();
     let fps_str = actual_fps.map(|f| format!(" {}fps", f)).unwrap_or_default();
@@ -754,12 +684,14 @@ pub fn draw_stereo(
     let title = format!(" termwave — stereo [{}] ({} bars{}){} ", theme_name, num_bars, sens_str, fps_str);
     let bottom = format!(" {} | ? help ", device);
 
-    terminal.draw(|frame| {
+    {
         let area = frame.area();
+        let border_color = theme.gradient[theme.gradient.len() / 2];
         let border = Block::default()
-            .title(title.as_str())
-            .title_bottom(bottom.as_str())
-            .borders(Borders::ALL);
+            .title(Span::styled(title.as_str(), Style::default().fg(border_color)))
+            .title_bottom(Span::styled(bottom.as_str(), Style::default().fg(border_color)))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(border_color));
         let inner = border.inner(area);
         frame.render_widget(border, area);
 
@@ -869,7 +801,5 @@ pub fn draw_stereo(
                 }
             }
         }
-    })?;
-
-    Ok(())
+    }
 }

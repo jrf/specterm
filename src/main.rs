@@ -8,7 +8,6 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use clap::Parser;
-use crossterm::event::KeyCode;
 
 #[derive(Parser)]
 #[command(name = "termwave", about = "Terminal audio visualizer")]
@@ -276,8 +275,8 @@ fn main() -> Result<()> {
     let mut last_restart_attempt: Option<Instant> = None;
     const RESTART_COOLDOWN: Duration = Duration::from_secs(2);
 
-    // Theme picker overlay state
-    let mut theme_picker: Option<render::ThemePicker> = None;
+    // Settings overlay state (None = closed)
+    let mut settings_state: Option<render::SettingsState> = None;
 
     loop {
         let frame_start = Instant::now();
@@ -303,117 +302,94 @@ fn main() -> Result<()> {
             prev_right = vec![0.0; num_bars];
         }
 
-        // When theme picker is open, handle its input separately
-        if let Some(ref mut picker) = theme_picker {
+        // Input handling: settings overlay intercepts keys when open
+        if let Some(ref mut sstate) = settings_state {
             if let Some(key) = render::poll_key(Duration::ZERO)? {
-                match key {
-                    KeyCode::Up | KeyCode::Char('k') => picker.up(),
-                    KeyCode::Down | KeyCode::Char('j') => picker.down(),
-                    KeyCode::Enter => {
-                        theme_idx = picker.selected;
-                        current_theme = &theme::THEMES[theme_idx];
-                        settings.theme_idx = theme_idx;
-                        save_state(&mut cfg, &settings, current_theme.name, &mode);
-                        theme_picker = None;
-                    }
-                    KeyCode::Esc | KeyCode::Char('t') => {
-                        // Revert to the theme that was active before opening the picker
-                        current_theme = &theme::THEMES[theme_idx];
-                        theme_picker = None;
-                    }
-                    KeyCode::Char('q') => break,
-                    _ => {}
-                }
-                // Live-preview the selected theme while browsing
-                if let Some(ref picker) = theme_picker {
-                    current_theme = &theme::THEMES[picker.selected];
-                }
-            }
-        } else {
-
-        match render::poll_input(Duration::ZERO)? {
-            render::Action::Quit => break,
-            render::Action::CycleMode => {
-                mode = mode.next();
-                prev_bars = vec![0.0; num_bars];
-                prev_left = vec![0.0; num_bars];
-                prev_right = vec![0.0; num_bars];
-                save_state(&mut cfg, &settings, current_theme.name, &mode);
-                continue;
-            }
-            render::Action::SelectDevice => {
-                let devices = audio::list_devices()?;
-                match render::device_menu(&mut terminal, &devices, current_theme)? {
-                    render::DeviceMenuResult::Selected(new_device) => {
-                        drop(capture);
-                        let (sr, handle) =
-                            start_audio(&mono_buf, &stereo, new_device.as_deref(), &last_write)?;
-                        sample_rate = sr;
-                        capture = handle;
-                        device_name =
-                            new_device.unwrap_or_else(|| audio::SYSTEM_AUDIO_LABEL.to_string());
-                        prev_bars = vec![0.0; num_bars];
-                        prev_left = vec![0.0; num_bars];
-                        prev_right = vec![0.0; num_bars];
-                        autosens = analysis::AutoSensitivity::new();
-                        autosens_l = analysis::AutoSensitivity::new();
-                        autosens_r = analysis::AutoSensitivity::new();
-                    }
-                    render::DeviceMenuResult::Quit => break,
-                    render::DeviceMenuResult::Cancelled => {}
-                }
-                continue;
-            }
-            render::Action::SelectTheme => {
-                theme_picker = Some(render::ThemePicker::new(theme_idx, theme::THEMES.len()));
-                current_theme = &theme::THEMES[theme_idx];
-            }
-            render::Action::Settings => {
-                match render::settings_menu(&mut terminal, &settings, theme::THEMES)? {
-                    Some(new_settings) => {
-                        settings = new_settings;
+                match sstate.handle_key(key, &mut settings, theme::THEMES.len()) {
+                    render::SettingsAction::Close => {
                         theme_idx = settings.theme_idx;
                         current_theme = &theme::THEMES[theme_idx];
                         save_state(&mut cfg, &settings, current_theme.name, &mode);
+                        settings_state = None;
                     }
-                    None => break,
+                    render::SettingsAction::Quit => break,
+                    render::SettingsAction::None => {
+                        // Settings changed live — update theme in case it was cycled
+                        theme_idx = settings.theme_idx;
+                        current_theme = &theme::THEMES[theme_idx];
+                    }
                 }
-                continue;
             }
-            render::Action::Help => {
-                render::help(&mut terminal, current_theme)?;
-                continue;
+        } else {
+            match render::poll_input(Duration::ZERO)? {
+                render::Action::Quit => break,
+                render::Action::CycleMode => {
+                    mode = mode.next();
+                    prev_bars = vec![0.0; num_bars];
+                    prev_left = vec![0.0; num_bars];
+                    prev_right = vec![0.0; num_bars];
+                    save_state(&mut cfg, &settings, current_theme.name, &mode);
+                    continue;
+                }
+                render::Action::SelectDevice => {
+                    let devices = audio::list_devices()?;
+                    match render::device_menu(&mut terminal, &devices, current_theme)? {
+                        render::DeviceMenuResult::Selected(new_device) => {
+                            drop(capture);
+                            let (sr, handle) =
+                                start_audio(&mono_buf, &stereo, new_device.as_deref(), &last_write)?;
+                            sample_rate = sr;
+                            capture = handle;
+                            device_name =
+                                new_device.unwrap_or_else(|| audio::SYSTEM_AUDIO_LABEL.to_string());
+                            prev_bars = vec![0.0; num_bars];
+                            prev_left = vec![0.0; num_bars];
+                            prev_right = vec![0.0; num_bars];
+                            autosens = analysis::AutoSensitivity::new();
+                            autosens_l = analysis::AutoSensitivity::new();
+                            autosens_r = analysis::AutoSensitivity::new();
+                        }
+                        render::DeviceMenuResult::Quit => break,
+                        render::DeviceMenuResult::Cancelled => {}
+                    }
+                    continue;
+                }
+                render::Action::Settings => {
+                    settings_state = Some(render::SettingsState::new());
+                }
+                render::Action::Help => {
+                    render::help(&mut terminal, current_theme)?;
+                    continue;
+                }
+                render::Action::SensUp => {
+                    settings.sensitivity = (settings.sensitivity + SENS_STEP).min(500);
+                    save_state(&mut cfg, &settings, current_theme.name, &mode);
+                    continue;
+                }
+                render::Action::SensDown => {
+                    settings.sensitivity = settings.sensitivity.saturating_sub(SENS_STEP).max(10);
+                    save_state(&mut cfg, &settings, current_theme.name, &mode);
+                    continue;
+                }
+                render::Action::MoreBars => {
+                    desired_bars = (num_bars + BAR_STEP).min(max_fit).min(MAX_BARS);
+                    num_bars = desired_bars;
+                    prev_bars = vec![0.0; num_bars];
+                    prev_left = vec![0.0; num_bars];
+                    prev_right = vec![0.0; num_bars];
+                    continue;
+                }
+                render::Action::FewerBars => {
+                    desired_bars = num_bars.saturating_sub(BAR_STEP).max(MIN_BARS);
+                    num_bars = desired_bars;
+                    prev_bars = vec![0.0; num_bars];
+                    prev_left = vec![0.0; num_bars];
+                    prev_right = vec![0.0; num_bars];
+                    continue;
+                }
+                render::Action::None => {}
             }
-            render::Action::SensUp => {
-                settings.sensitivity = (settings.sensitivity + SENS_STEP).min(500);
-                save_state(&mut cfg, &settings, current_theme.name, &mode);
-                continue;
-            }
-            render::Action::SensDown => {
-                settings.sensitivity = settings.sensitivity.saturating_sub(SENS_STEP).max(10);
-                save_state(&mut cfg, &settings, current_theme.name, &mode);
-                continue;
-            }
-            render::Action::MoreBars => {
-                desired_bars = (num_bars + BAR_STEP).min(max_fit).min(MAX_BARS);
-                num_bars = desired_bars;
-                prev_bars = vec![0.0; num_bars];
-                prev_left = vec![0.0; num_bars];
-                prev_right = vec![0.0; num_bars];
-                continue;
-            }
-            render::Action::FewerBars => {
-                desired_bars = num_bars.saturating_sub(BAR_STEP).max(MIN_BARS);
-                num_bars = desired_bars;
-                prev_bars = vec![0.0; num_bars];
-                prev_left = vec![0.0; num_bars];
-                prev_right = vec![0.0; num_bars];
-                continue;
-            }
-            render::Action::None => {}
         }
-
-        } // end else (theme picker not open)
 
         let dt = last_frame_time.elapsed().as_secs_f32().clamp(0.001, 0.1);
         last_frame_time = Instant::now();
@@ -478,7 +454,15 @@ fn main() -> Result<()> {
             None => device_name.clone(),
         };
 
-        match mode {
+        // Prepare render data outside the draw closure
+        enum RenderData {
+            Spectrum(Vec<f32>),
+            Stereo(Vec<f32>, Vec<f32>),
+            Wave(Vec<f32>),
+            Scope(Vec<f32>),
+        }
+
+        let render_data = match mode {
             Mode::Spectrum => {
                 let samples = {
                     let buf = mono_buf.lock().unwrap();
@@ -501,10 +485,9 @@ fn main() -> Result<()> {
                 if sens != 1.0 {
                     for v in smoothed.iter_mut() { *v *= sens; }
                 }
-                // Store prev_bars before gravity so gravity doesn't feed back into smoothing
                 prev_bars = smoothed.clone();
                 gravity.apply(&mut smoothed, dt);
-                render::draw_spectrum(&mut terminal, &smoothed, current_theme, &status, settings.gradient_by_position, actual_fps, settings.bar_width, settings.bar_spacing, settings.sensitivity)?;
+                RenderData::Spectrum(smoothed)
             }
             Mode::Stereo => {
                 let left_samples = {
@@ -525,7 +508,6 @@ fn main() -> Result<()> {
                 let right_bars = analysis::bin_spectrum(
                     &right_mag, num_bars, sample_rate, low_freq, high_freq,
                 );
-
 
                 let mut smooth_l =
                     analysis::smooth(&prev_left, &left_bars, settings.smoothing, dt);
@@ -549,36 +531,52 @@ fn main() -> Result<()> {
                     for v in smooth_l.iter_mut() { *v *= sens; }
                     for v in smooth_r.iter_mut() { *v *= sens; }
                 }
-                // Store before gravity so gravity doesn't feed back into smoothing
                 prev_left = smooth_l.clone();
                 prev_right = smooth_r.clone();
                 gravity_l.apply(&mut smooth_l, dt);
                 gravity_r.apply(&mut smooth_r, dt);
-
-                render::draw_stereo(
-                    &mut terminal, &smooth_l, &smooth_r, current_theme, &status, settings.gradient_by_position, actual_fps, settings.bar_width, settings.bar_spacing, settings.sensitivity,
-                )?;
+                RenderData::Stereo(smooth_l, smooth_r)
             }
             Mode::Wave => {
                 let samples = {
                     let buf = mono_buf.lock().unwrap();
                     buf.clone()
                 };
-                render::draw_wave(&mut terminal, &samples, current_theme, &status, actual_fps)?;
+                RenderData::Wave(samples)
             }
             Mode::Scope => {
                 let samples = {
                     let buf = mono_buf.lock().unwrap();
                     buf.clone()
                 };
-                render::draw_scope(&mut terminal, &samples, current_theme, &status, actual_fps)?;
+                RenderData::Scope(samples)
             }
-        }
+        };
 
-        // Draw theme picker overlay on top of the visualizer
-        if let Some(ref picker) = theme_picker {
-            render::draw_theme_overlay(&mut terminal, theme::THEMES, picker)?;
-        }
+        // Single terminal.draw call: visualizer + optional settings overlay
+        let settings_ref = &settings;
+        let sstate_ref = &settings_state;
+        terminal.draw(|frame| {
+            match &render_data {
+                RenderData::Spectrum(smoothed) => {
+                    render::render_spectrum(frame, smoothed, current_theme, &status, settings_ref.gradient_by_position, actual_fps, settings_ref.bar_width, settings_ref.bar_spacing, settings_ref.sensitivity);
+                }
+                RenderData::Stereo(smooth_l, smooth_r) => {
+                    render::render_stereo(frame, smooth_l, smooth_r, current_theme, &status, settings_ref.gradient_by_position, actual_fps, settings_ref.bar_width, settings_ref.bar_spacing, settings_ref.sensitivity);
+                }
+                RenderData::Wave(samples) => {
+                    render::render_wave(frame, samples, current_theme, &status, actual_fps);
+                }
+                RenderData::Scope(samples) => {
+                    render::render_scope(frame, samples, current_theme, &status, actual_fps);
+                }
+            }
+
+            // Settings overlay on top
+            if let Some(ref sstate) = sstate_ref {
+                render::render_settings(frame, settings_ref, theme::THEMES, sstate);
+            }
+        })?;
 
         let elapsed = frame_start.elapsed();
         if elapsed < frame_duration {
