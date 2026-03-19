@@ -567,11 +567,13 @@ pub fn draw_spectrum(
     actual_fps: Option<u32>,
     bar_width: usize,
     bar_spacing: usize,
+    sensitivity: u32,
 ) -> Result<()> {
     let theme_name = theme.name;
     let num_bars = bars.len();
     let fps_str = actual_fps.map(|f| format!(" {}fps", f)).unwrap_or_default();
-    let title = format!(" termwave — spectrum [{}] ({} bars){} ", theme_name, num_bars, fps_str);
+    let sens_str = format!(" {}% sensitivity", sensitivity);
+    let title = format!(" termwave — spectrum [{}] ({} bars{}){} ", theme_name, num_bars, sens_str, fps_str);
     let bottom = format!(" {} | ? help ", device);
 
     terminal.draw(|frame| {
@@ -711,11 +713,13 @@ pub fn draw_stereo(
     actual_fps: Option<u32>,
     bar_width: usize,
     bar_spacing: usize,
+    sensitivity: u32,
 ) -> Result<()> {
     let theme_name = theme.name;
     let num_bars = left_bars.len();
     let fps_str = actual_fps.map(|f| format!(" {}fps", f)).unwrap_or_default();
-    let title = format!(" termwave — stereo [{}] ({} bars){} ", theme_name, num_bars, fps_str);
+    let sens_str = format!(" {}% sensitivity", sensitivity);
+    let title = format!(" termwave — stereo [{}] ({} bars{}){} ", theme_name, num_bars, sens_str, fps_str);
     let bottom = format!(" {} | ? help ", device);
 
     terminal.draw(|frame| {

@@ -479,7 +479,7 @@ fn main() -> Result<()> {
                 // Store prev_bars before gravity so gravity doesn't feed back into smoothing
                 prev_bars = smoothed.clone();
                 gravity.apply(&mut smoothed, dt);
-                render::draw_spectrum(&mut terminal, &smoothed, current_theme, &status, settings.gradient_by_position, actual_fps, settings.bar_width, settings.bar_spacing)?;
+                render::draw_spectrum(&mut terminal, &smoothed, current_theme, &status, settings.gradient_by_position, actual_fps, settings.bar_width, settings.bar_spacing, settings.sensitivity)?;
             }
             Mode::Stereo => {
                 let left_samples = {
@@ -531,7 +531,7 @@ fn main() -> Result<()> {
                 gravity_r.apply(&mut smooth_r, dt);
 
                 render::draw_stereo(
-                    &mut terminal, &smooth_l, &smooth_r, current_theme, &status, settings.gradient_by_position, actual_fps, settings.bar_width, settings.bar_spacing,
+                    &mut terminal, &smooth_l, &smooth_r, current_theme, &status, settings.gradient_by_position, actual_fps, settings.bar_width, settings.bar_spacing, settings.sensitivity,
                 )?;
             }
             Mode::Wave => {
