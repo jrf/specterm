@@ -278,7 +278,7 @@ pub fn render_settings(frame: &mut ratatui::Frame, settings: &Settings, themes: 
         format!("  {:16}", "Theme"),
         Style::default().fg(accent),
     )];
-    for &color in theme.gradient {
+    for &color in &theme.gradient {
         theme_spans.push(Span::styled("██", Style::default().fg(color)));
     }
     theme_spans.push(Span::raw(format!("  {}", theme.name)));
@@ -529,7 +529,7 @@ pub fn render_spectrum(
     bar_spacing: usize,
     sensitivity: u32,
 ) {
-    let theme_name = theme.name;
+    let theme_name = &theme.name;
     let num_bars = bars.len();
     let fps_str = actual_fps.map(|f| format!(" {}fps", f)).unwrap_or_default();
     let sens_str = format!(" {}% sensitivity", sensitivity);
@@ -677,7 +677,7 @@ pub fn render_stereo(
     bar_spacing: usize,
     sensitivity: u32,
 ) {
-    let theme_name = theme.name;
+    let theme_name = &theme.name;
     let num_bars = left_bars.len();
     let fps_str = actual_fps.map(|f| format!(" {}fps", f)).unwrap_or_default();
     let sens_str = format!(" {}% sensitivity", sensitivity);

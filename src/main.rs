@@ -20,7 +20,7 @@ struct Cli {
     #[arg(short, long)]
     device: Option<String>,
 
-    /// Color theme (classic, fire, ocean, purple, matrix, mono)
+    /// Color theme (loaded from ~/.config/termwave/themes/)
     #[arg(short, long)]
     theme: Option<String>,
 
@@ -235,11 +235,15 @@ fn main() -> Result<()> {
     let mut prev_right: Vec<f32> = vec![0.0; num_bars];
     let low_freq = cfg.low_freq;
     let high_freq = cfg.high_freq;
-    let mut theme_idx = theme::THEMES
+    let themes = theme::load_themes();
+    if themes.is_empty() {
+        anyhow::bail!("No theme files found in ~/.config/termwave/themes/");
+    }
+    let mut theme_idx = themes
         .iter()
         .position(|t| t.name == cfg.theme)
         .unwrap_or(0);
-    let mut current_theme = &theme::THEMES[theme_idx];
+    let mut current_theme = &themes[theme_idx];
 
     let mut settings = render::Settings {
         smoothing: cfg.smoothing.clamp(0.0, 0.99),
@@ -305,18 +309,18 @@ fn main() -> Result<()> {
         // Input handling: settings overlay intercepts keys when open
         if let Some(ref mut sstate) = settings_state {
             if let Some(key) = render::poll_key(Duration::ZERO)? {
-                match sstate.handle_key(key, &mut settings, theme::THEMES.len()) {
+                match sstate.handle_key(key, &mut settings, themes.len()) {
                     render::SettingsAction::Close => {
                         theme_idx = settings.theme_idx;
-                        current_theme = &theme::THEMES[theme_idx];
-                        save_state(&mut cfg, &settings, current_theme.name, &mode);
+                        current_theme = &themes[theme_idx];
+                        save_state(&mut cfg, &settings, &current_theme.name, &mode);
                         settings_state = None;
                     }
                     render::SettingsAction::Quit => break,
                     render::SettingsAction::None => {
                         // Settings changed live — update theme in case it was cycled
                         theme_idx = settings.theme_idx;
-                        current_theme = &theme::THEMES[theme_idx];
+                        current_theme = &themes[theme_idx];
                     }
                 }
             }
@@ -328,7 +332,7 @@ fn main() -> Result<()> {
                     prev_bars = vec![0.0; num_bars];
                     prev_left = vec![0.0; num_bars];
                     prev_right = vec![0.0; num_bars];
-                    save_state(&mut cfg, &settings, current_theme.name, &mode);
+                    save_state(&mut cfg, &settings, &current_theme.name, &mode);
                     continue;
                 }
                 render::Action::SelectDevice => {
@@ -363,12 +367,12 @@ fn main() -> Result<()> {
                 }
                 render::Action::SensUp => {
                     settings.sensitivity = (settings.sensitivity + SENS_STEP).min(500);
-                    save_state(&mut cfg, &settings, current_theme.name, &mode);
+                    save_state(&mut cfg, &settings, &current_theme.name, &mode);
                     continue;
                 }
                 render::Action::SensDown => {
                     settings.sensitivity = settings.sensitivity.saturating_sub(SENS_STEP).max(10);
-                    save_state(&mut cfg, &settings, current_theme.name, &mode);
+                    save_state(&mut cfg, &settings, &current_theme.name, &mode);
                     continue;
                 }
                 render::Action::MoreBars => {
@@ -574,7 +578,7 @@ fn main() -> Result<()> {
 
             // Settings overlay on top
             if let Some(ref sstate) = sstate_ref {
-                render::render_settings(frame, settings_ref, theme::THEMES, sstate);
+                render::render_settings(frame, settings_ref, &themes, sstate);
             }
         })?;
 

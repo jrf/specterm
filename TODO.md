@@ -28,6 +28,7 @@
 - [x] Device enumeration and selection via `--device` flag / `--list-devices`
 - [x] Runtime device switching via `d` keybinding
 - [x] Configurable color themes (8 built-in: classic, fire, ocean, purple, matrix, synthwave, tokyo-night-moon, mono)
+- [x] Externalize theme colors to TOML files in `~/.config/termwave/themes/`
 - [x] Stereo mode: mirrored L/R bars growing up and down from center with half-cell precision
 - [x] Now-playing Apple Music track display in status bar
 - [x] Bar width and spacing customization (settings menu + CLI flags)

@@ -1,4 +1,12 @@
 //! Color themes for the visualizer.
+//!
+//! Themes are loaded from TOML files in `~/.config/termwave/themes/`. Each file
+//! defines a `[colors]` table of named hex colors and a `[visualizer]` table
+//! that references those names for the gradient, wave, and scope colors.
+
+use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
 
 use ratatui::style::Color;
 
@@ -6,29 +14,19 @@ use ratatui::style::Color;
 /// color used for waveform/oscilloscope modes.
 #[derive(Clone)]
 pub struct Theme {
-    pub name: &'static str,
+    pub name: String,
     /// Colors from low to high amplitude. Must have at least one entry.
-    pub gradient: &'static [Color],
+    pub gradient: Vec<Color>,
     /// Line color for waveform mode.
     pub wave_color: Color,
     /// Line color for oscilloscope mode.
     pub scope_color: Color,
 }
 
-/// Convert a ratatui Color to (r, g, b). Named ANSI colors are mapped to
-/// typical terminal defaults.
+/// Convert a ratatui Color to (r, g, b).
 fn color_to_rgb(c: Color) -> (u8, u8, u8) {
     match c {
         Color::Rgb(r, g, b) => (r, g, b),
-        Color::Black => (0, 0, 0),
-        Color::Red => (205, 0, 0),
-        Color::Green => (0, 205, 0),
-        Color::Yellow => (205, 205, 0),
-        Color::Blue => (0, 0, 238),
-        Color::Magenta => (205, 0, 205),
-        Color::Cyan => (0, 205, 205),
-        Color::White => (255, 255, 255),
-        Color::Gray => (128, 128, 128),
         _ => (255, 255, 255),
     }
 }
@@ -61,129 +59,118 @@ impl Theme {
     /// Pick a gradient color based on a normalized value (0.0–1.0),
     /// interpolating between gradient stops.
     pub fn bar_color(&self, normalized: f32) -> Color {
-        sample_gradient(self.gradient, normalized)
+        sample_gradient(&self.gradient, normalized)
     }
 }
 
-pub const THEMES: &[Theme] = &[
-    Theme {
-        name: "classic",
-        gradient: &[
-            Color::Rgb(0, 0, 180),
-            Color::Rgb(0, 140, 220),
-            Color::Rgb(0, 220, 180),
-            Color::Rgb(0, 200, 80),
-            Color::Rgb(160, 220, 0),
-            Color::Rgb(255, 200, 0),
-            Color::Rgb(255, 100, 0),
-            Color::Rgb(220, 0, 0),
-        ],
-        wave_color: Color::Rgb(0, 220, 220),
-        scope_color: Color::Rgb(0, 200, 80),
-    },
-    Theme {
-        name: "fire",
-        gradient: &[
-            Color::Rgb(60, 0, 0),
-            Color::Rgb(140, 0, 0),
-            Color::Rgb(200, 40, 0),
-            Color::Rgb(255, 100, 0),
-            Color::Rgb(255, 160, 20),
-            Color::Rgb(255, 210, 60),
-            Color::Rgb(255, 240, 140),
-            Color::Rgb(255, 255, 220),
-        ],
-        wave_color: Color::Rgb(255, 140, 20),
-        scope_color: Color::Rgb(255, 220, 80),
-    },
-    Theme {
-        name: "ocean",
-        gradient: &[
-            Color::Rgb(0, 10, 40),
-            Color::Rgb(0, 30, 80),
-            Color::Rgb(0, 70, 140),
-            Color::Rgb(0, 120, 180),
-            Color::Rgb(0, 170, 210),
-            Color::Rgb(0, 210, 225),
-            Color::Rgb(80, 235, 240),
-            Color::Rgb(180, 255, 255),
-        ],
-        wave_color: Color::Rgb(0, 200, 220),
-        scope_color: Color::Rgb(120, 240, 245),
-    },
-    Theme {
-        name: "purple",
-        gradient: &[
-            Color::Rgb(20, 0, 40),
-            Color::Rgb(50, 0, 90),
-            Color::Rgb(90, 0, 150),
-            Color::Rgb(140, 0, 200),
-            Color::Rgb(180, 50, 235),
-            Color::Rgb(210, 100, 255),
-            Color::Rgb(235, 160, 255),
-            Color::Rgb(255, 210, 255),
-        ],
-        wave_color: Color::Rgb(200, 80, 255),
-        scope_color: Color::Rgb(240, 170, 255),
-    },
-    Theme {
-        name: "matrix",
-        gradient: &[
-            Color::Rgb(0, 20, 0),
-            Color::Rgb(0, 50, 0),
-            Color::Rgb(0, 90, 0),
-            Color::Rgb(0, 140, 0),
-            Color::Rgb(0, 185, 0),
-            Color::Rgb(0, 225, 0),
-            Color::Rgb(60, 245, 60),
-            Color::Rgb(160, 255, 160),
-        ],
-        wave_color: Color::Rgb(0, 210, 0),
-        scope_color: Color::Rgb(80, 255, 80),
-    },
-    Theme {
-        name: "synthwave",
-        gradient: &[
-            Color::Rgb(10, 0, 30),
-            Color::Rgb(40, 0, 90),
-            Color::Rgb(80, 0, 150),
-            Color::Rgb(140, 0, 180),
-            Color::Rgb(200, 0, 170),
-            Color::Rgb(255, 20, 147),
-            Color::Rgb(255, 80, 80),
-            Color::Rgb(255, 150, 50),
-        ],
-        wave_color: Color::Rgb(255, 20, 147),
-        scope_color: Color::Rgb(200, 0, 180),
-    },
-    Theme {
-        name: "tokyo-night-moon",
-        gradient: &[
-            Color::Rgb(0x3e, 0x68, 0xd7), // blue0
-            Color::Rgb(0x82, 0xaa, 0xff), // blue
-            Color::Rgb(0x65, 0xbc, 0xff), // blue1
-            Color::Rgb(0x86, 0xe1, 0xfc), // cyan
-            Color::Rgb(0xc3, 0xe8, 0x8d), // green
-            Color::Rgb(0xff, 0xc7, 0x77), // yellow
-            Color::Rgb(0xff, 0x96, 0x6c), // orange
-            Color::Rgb(0xff, 0x75, 0x7f), // red
-        ],
-        wave_color: Color::Rgb(0x82, 0xaa, 0xff),    // blue
-        scope_color: Color::Rgb(0x86, 0xe1, 0xfc),   // cyan
-    },
-    Theme {
-        name: "mono",
-        gradient: &[
-            Color::Rgb(50, 50, 50),
-            Color::Rgb(85, 85, 85),
-            Color::Rgb(120, 120, 120),
-            Color::Rgb(150, 150, 150),
-            Color::Rgb(180, 180, 180),
-            Color::Rgb(205, 205, 205),
-            Color::Rgb(230, 230, 230),
-            Color::White,
-        ],
-        wave_color: Color::Rgb(200, 200, 200),
-        scope_color: Color::White,
-    },
-];
+// ---------------------------------------------------------------------------
+// Theme loading from TOML files
+// ---------------------------------------------------------------------------
+
+/// Parse a hex color string like "#82aaff" into a ratatui Color.
+fn parse_hex(s: &str) -> Option<Color> {
+    let s = s.strip_prefix('#')?;
+    if s.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+    Some(Color::Rgb(r, g, b))
+}
+
+/// Resolve a color value — either a direct hex string or a reference to a
+/// named color in the palette.
+fn resolve_color(value: &str, palette: &HashMap<String, Color>) -> Option<Color> {
+    if value.starts_with('#') {
+        parse_hex(value)
+    } else {
+        palette.get(value).copied()
+    }
+}
+
+/// Load a single theme from a TOML string. The file name (without extension)
+/// is used as the theme name.
+fn parse_theme(name: &str, content: &str) -> Option<Theme> {
+    let table: toml::Table = content.parse().ok()?;
+
+    // Parse [colors] into a palette
+    let colors_table = table.get("colors")?.as_table()?;
+    let mut palette = HashMap::new();
+    for (key, val) in colors_table {
+        if let Some(hex) = val.as_str().and_then(parse_hex) {
+            palette.insert(key.clone(), hex);
+        }
+    }
+
+    // Parse [visualizer]
+    let vis = table.get("visualizer")?.as_table()?;
+
+    let gradient_arr = vis.get("gradient")?.as_array()?;
+    let gradient: Vec<Color> = gradient_arr
+        .iter()
+        .filter_map(|v| v.as_str().and_then(|s| resolve_color(s, &palette)))
+        .collect();
+
+    if gradient.is_empty() {
+        return None;
+    }
+
+    let wave_color = vis
+        .get("wave_color")
+        .and_then(|v| v.as_str())
+        .and_then(|s| resolve_color(s, &palette))
+        .unwrap_or(gradient[gradient.len() / 2]);
+
+    let scope_color = vis
+        .get("scope_color")
+        .and_then(|v| v.as_str())
+        .and_then(|s| resolve_color(s, &palette))
+        .unwrap_or(gradient[gradient.len() / 2]);
+
+    Some(Theme {
+        name: name.to_string(),
+        gradient,
+        wave_color,
+        scope_color,
+    })
+}
+
+/// Get the themes directory path (~/.config/termwave/themes/).
+fn themes_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(".config")
+        .join("termwave")
+        .join("themes")
+}
+
+/// Load all themes from the themes directory. Returns an empty vec if no
+/// valid theme files are found.
+pub fn load_themes() -> Vec<Theme> {
+    let dir = themes_dir();
+    let mut themes = Vec::new();
+
+    if let Ok(entries) = fs::read_dir(&dir) {
+        let mut entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+        entries.sort_by_key(|e| e.file_name());
+
+        for entry in entries {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("toml") {
+                let name = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                if let Ok(content) = fs::read_to_string(&path) {
+                    if let Some(theme) = parse_theme(&name, &content) {
+                        themes.push(theme);
+                    }
+                }
+            }
+        }
+    }
+
+    themes
+}
