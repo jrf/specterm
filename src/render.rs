@@ -553,7 +553,6 @@ pub fn render_spectrum(
         frame.render_widget(border, area);
 
         let buf = frame.buffer_mut();
-        let max_val = bars.iter().cloned().fold(0.0f32, f32::max).max(0.001);
         let bar_w = ctx.bar_width;
         let stride = bar_w + ctx.bar_spacing;
         // Center bars within the available width
@@ -563,7 +562,7 @@ pub fn render_spectrum(
         let height = inner.height as f32;
 
         for (i, &v) in bars.iter().enumerate() {
-            let normalized = v / max_val;
+            let normalized = v.clamp(0.0, 1.0);
 
             // Total height in 1/8ths of a cell
             let eighths = (normalized * height * 8.0) as usize;
@@ -695,8 +694,6 @@ pub fn render_stereo(
         frame.render_widget(border, area);
 
         let buf = frame.buffer_mut();
-        let left_max = left_bars.iter().cloned().fold(0.0f32, f32::max).max(0.001);
-        let right_max = right_bars.iter().cloned().fold(0.0f32, f32::max).max(0.001);
         let bar_w = ctx.bar_width;
         let stride = bar_w + ctx.bar_spacing;
         let total_w = if num_bars > 0 { num_bars * bar_w + (num_bars - 1) * ctx.bar_spacing } else { 0 };
@@ -716,7 +713,7 @@ pub fn render_stereo(
         // Left channel: bars grow upward from center using block elements
         let half_h_f = half_h as f32;
         for (i, &v) in left_bars.iter().enumerate() {
-            let normalized = (v / left_max).clamp(0.0, 1.0);
+            let normalized = v.clamp(0.0, 1.0);
 
             let eighths = (normalized * half_h_f * 8.0) as usize;
             let full_cells = eighths / 8;
@@ -763,7 +760,7 @@ pub fn render_stereo(
         let lower_h = inner.height - half_h - 1; // -1 for center line
         let lower_h_f = lower_h as f32;
         for (i, &v) in right_bars.iter().enumerate() {
-            let normalized = (v / right_max).clamp(0.0, 1.0);
+            let normalized = v.clamp(0.0, 1.0);
 
             // Height in half-cells (2x resolution via ▀)
             let halves = (normalized * lower_h_f * 2.0) as usize;
