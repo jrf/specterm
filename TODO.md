@@ -13,6 +13,7 @@
 - [ ] Fallback to virtual audio device (BlackHole) if ScreenCaptureKit unavailable
 
 ## Done
+- [x] Refactor: extract `VisualizerState`, `AudioState`, `RenderContext` structs; deduplicate DSP pipeline and buffer resets; break up 432-line main() into focused functions #refactor
 - [x] Audio capture: open default input device with cpal, write samples to shared ring buffer
 - [x] Spectrum rendering: draw frequency bars using ratatui BarChart
 - [x] Wire main loop: audio thread -> ring buffer -> FFT -> render at ~30fps

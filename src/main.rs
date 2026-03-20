@@ -111,6 +111,168 @@ const SENS_STEP: u32 = 10;
 /// Gravity acceleration in units/s². At 60fps (dt≈0.017s), a bar at height 1.0
 /// takes about 0.25s to fall — similar feel to the old per-frame 0.01 value.
 const GRAVITY_ACCEL: f32 = 5.0;
+/// Cooldown between tap restart attempts.
+const RESTART_COOLDOWN: Duration = Duration::from_secs(2);
+/// Audio is considered stale after this long without new samples.
+const STALE_AUDIO_THRESHOLD: Duration = Duration::from_millis(100);
+
+/// Bundles audio capture state passed between functions.
+struct AudioState {
+    mono_buf: audio::SampleBuffer,
+    stereo: audio::StereoPair,
+    last_write: audio::LastWriteTime,
+    device_name: String,
+    sample_rate: u32,
+    capture: audio::CaptureHandle,
+    last_restart_attempt: Option<Instant>,
+}
+
+/// Bundles all mutable DSP and bar state for the visualizer.
+struct VisualizerState {
+    desired_bars: usize,
+    num_bars: usize,
+    prev_bars: Vec<f32>,
+    prev_left: Vec<f32>,
+    prev_right: Vec<f32>,
+    autosens: analysis::AutoSensitivity,
+    autosens_l: analysis::AutoSensitivity,
+    autosens_r: analysis::AutoSensitivity,
+    gravity: analysis::Gravity,
+    gravity_l: analysis::Gravity,
+    gravity_r: analysis::Gravity,
+    analyzer: analysis::SpectrumAnalyzer,
+}
+
+impl VisualizerState {
+    fn new() -> Self {
+        Self {
+            desired_bars: MAX_BARS,
+            num_bars: MIN_BARS,
+            prev_bars: vec![0.0; MIN_BARS],
+            prev_left: vec![0.0; MIN_BARS],
+            prev_right: vec![0.0; MIN_BARS],
+            autosens: analysis::AutoSensitivity::new(),
+            autosens_l: analysis::AutoSensitivity::new(),
+            autosens_r: analysis::AutoSensitivity::new(),
+            gravity: analysis::Gravity::new(GRAVITY_ACCEL),
+            gravity_l: analysis::Gravity::new(GRAVITY_ACCEL),
+            gravity_r: analysis::Gravity::new(GRAVITY_ACCEL),
+            analyzer: analysis::SpectrumAnalyzer::new(),
+        }
+    }
+
+    /// Reset bar buffers (e.g. on mode change, device switch, or bar count change).
+    fn reset_bars(&mut self) {
+        self.prev_bars = vec![0.0; self.num_bars];
+        self.prev_left = vec![0.0; self.num_bars];
+        self.prev_right = vec![0.0; self.num_bars];
+    }
+
+    /// Reset auto-sensitivity trackers (e.g. on device switch or silence).
+    fn reset_sensitivity(&mut self) {
+        self.autosens = analysis::AutoSensitivity::new();
+        self.autosens_l = analysis::AutoSensitivity::new();
+        self.autosens_r = analysis::AutoSensitivity::new();
+    }
+
+    /// Resize bar count if it differs from current, resetting buffers.
+    fn resize_bars(&mut self, new_count: usize) {
+        if new_count != self.num_bars {
+            self.num_bars = new_count;
+            self.reset_bars();
+        }
+    }
+
+    /// Run the shared DSP pipeline on a single channel: smooth → monstercat →
+    /// noise gate → auto-sensitivity → manual sensitivity → gravity.
+    fn process_channel(
+        prev: &mut Vec<f32>,
+        raw_bars: &[f32],
+        settings: &render::Settings,
+        dt: f32,
+        autosens: &mut analysis::AutoSensitivity,
+        gravity: &mut analysis::Gravity,
+    ) -> Vec<f32> {
+        let mut smoothed = analysis::smooth(prev, raw_bars, settings.smoothing, dt);
+        if settings.monstercat {
+            analysis::monstercat(&mut smoothed, MONSTERCAT_STRENGTH);
+        }
+        if settings.noise_floor > 0.0 {
+            analysis::noise_gate(&mut smoothed, settings.noise_floor);
+        }
+        autosens.apply(&mut smoothed, dt);
+        let sens = settings.sensitivity as f32 / 100.0;
+        if sens != 1.0 {
+            for v in smoothed.iter_mut() {
+                *v *= sens;
+            }
+        }
+        *prev = smoothed.clone();
+        gravity.apply(&mut smoothed, dt);
+        smoothed
+    }
+
+    /// Process mono spectrum and return render-ready bars.
+    fn process_spectrum(
+        &mut self,
+        samples: &[f32],
+        sample_rate: u32,
+        low_freq: f32,
+        high_freq: f32,
+        settings: &render::Settings,
+        dt: f32,
+    ) -> Vec<f32> {
+        let magnitudes = self.analyzer.spectrum(samples);
+        let bars =
+            analysis::bin_spectrum(&magnitudes, self.num_bars, sample_rate, low_freq, high_freq);
+        Self::process_channel(
+            &mut self.prev_bars,
+            &bars,
+            settings,
+            dt,
+            &mut self.autosens,
+            &mut self.gravity,
+        )
+    }
+
+    /// Process stereo spectrum and return render-ready (left, right) bars.
+    #[allow(clippy::too_many_arguments)]
+    fn process_stereo(
+        &mut self,
+        left_samples: &[f32],
+        right_samples: &[f32],
+        sample_rate: u32,
+        low_freq: f32,
+        high_freq: f32,
+        settings: &render::Settings,
+        dt: f32,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let left_mag = self.analyzer.spectrum(left_samples);
+        let right_mag = self.analyzer.spectrum(right_samples);
+        let left_bars =
+            analysis::bin_spectrum(&left_mag, self.num_bars, sample_rate, low_freq, high_freq);
+        let right_bars =
+            analysis::bin_spectrum(&right_mag, self.num_bars, sample_rate, low_freq, high_freq);
+
+        let smooth_l = Self::process_channel(
+            &mut self.prev_left,
+            &left_bars,
+            settings,
+            dt,
+            &mut self.autosens_l,
+            &mut self.gravity_l,
+        );
+        let smooth_r = Self::process_channel(
+            &mut self.prev_right,
+            &right_bars,
+            settings,
+            dt,
+            &mut self.autosens_r,
+            &mut self.gravity_r,
+        );
+        (smooth_l, smooth_r)
+    }
+}
 
 fn start_audio(
     mono_buf: &audio::SampleBuffer,
@@ -159,6 +321,180 @@ fn save_state(
     let _ = config::save(cfg);
 }
 
+/// What the main loop should do after handling input.
+enum LoopAction {
+    Continue,
+    Skip,
+    Quit,
+}
+
+/// Handle input when the settings overlay is open.
+fn handle_settings_input(
+    settings_state: &mut Option<render::SettingsState>,
+    settings: &mut render::Settings,
+    themes: &[theme::Theme],
+    theme_idx: &mut usize,
+    cfg: &mut config::Config,
+    mode: &Mode,
+) -> Result<LoopAction> {
+    if let Some(ref mut sstate) = settings_state {
+        if let Some(key) = render::poll_key(Duration::ZERO)? {
+            match sstate.handle_key(key, settings, themes.len()) {
+                render::SettingsAction::Close => {
+                    *theme_idx = settings.theme_idx;
+                    save_state(cfg, settings, &themes[*theme_idx].name, mode);
+                    *settings_state = None;
+                }
+                render::SettingsAction::Quit => return Ok(LoopAction::Quit),
+                render::SettingsAction::None => {
+                    *theme_idx = settings.theme_idx;
+                }
+            }
+        }
+    }
+    Ok(LoopAction::Continue)
+}
+
+/// Handle input when no overlay is open. Returns LoopAction.
+#[allow(clippy::too_many_arguments)]
+fn handle_normal_input(
+    vis: &mut VisualizerState,
+    settings: &mut render::Settings,
+    settings_state: &mut Option<render::SettingsState>,
+    mode: &mut Mode,
+    terminal: &mut render::Term,
+    themes: &[theme::Theme],
+    theme_idx: usize,
+    cfg: &mut config::Config,
+    audio: &mut AudioState,
+    max_fit: usize,
+) -> Result<LoopAction> {
+    match render::poll_input(Duration::ZERO)? {
+        render::Action::Quit => return Ok(LoopAction::Quit),
+        render::Action::CycleMode => {
+            *mode = mode.next();
+            vis.reset_bars();
+            save_state(cfg, settings, &themes[theme_idx].name, mode);
+            return Ok(LoopAction::Skip);
+        }
+        render::Action::SelectDevice => {
+            let devices = audio::list_devices()?;
+            match render::device_menu(terminal, &devices, &themes[theme_idx])? {
+                render::DeviceMenuResult::Selected(new_device) => {
+                    drop_capture(&mut audio.capture);
+                    let (sr, handle) = start_audio(
+                        &audio.mono_buf,
+                        &audio.stereo,
+                        new_device.as_deref(),
+                        &audio.last_write,
+                    )?;
+                    audio.sample_rate = sr;
+                    audio.capture = handle;
+                    audio.device_name =
+                        new_device.unwrap_or_else(|| audio::SYSTEM_AUDIO_LABEL.to_string());
+                    vis.reset_bars();
+                    vis.reset_sensitivity();
+                }
+                render::DeviceMenuResult::Quit => return Ok(LoopAction::Quit),
+                render::DeviceMenuResult::Cancelled => {}
+            }
+            return Ok(LoopAction::Skip);
+        }
+        render::Action::Settings => {
+            *settings_state = Some(render::SettingsState::new());
+        }
+        render::Action::Help => {
+            render::help(terminal, &themes[theme_idx])?;
+            return Ok(LoopAction::Skip);
+        }
+        render::Action::SensUp => {
+            settings.sensitivity = (settings.sensitivity + SENS_STEP).min(500);
+            save_state(cfg, settings, &themes[theme_idx].name, mode);
+            return Ok(LoopAction::Skip);
+        }
+        render::Action::SensDown => {
+            settings.sensitivity = settings.sensitivity.saturating_sub(SENS_STEP).max(10);
+            save_state(cfg, settings, &themes[theme_idx].name, mode);
+            return Ok(LoopAction::Skip);
+        }
+        render::Action::MoreBars => {
+            vis.desired_bars = (vis.num_bars + BAR_STEP).min(max_fit).min(MAX_BARS);
+            vis.num_bars = vis.desired_bars;
+            vis.reset_bars();
+            return Ok(LoopAction::Skip);
+        }
+        render::Action::FewerBars => {
+            vis.desired_bars = vis.num_bars.saturating_sub(BAR_STEP).max(MIN_BARS);
+            vis.num_bars = vis.desired_bars;
+            vis.reset_bars();
+            return Ok(LoopAction::Skip);
+        }
+        render::Action::None => {}
+    }
+    Ok(LoopAction::Continue)
+}
+
+/// Drop old capture handle safely by replacing with a dummy.
+fn drop_capture(capture: &mut audio::CaptureHandle) {
+    let old = std::mem::replace(
+        capture,
+        audio::CaptureHandle::Tap(
+            std::process::Command::new("true")
+                .spawn()
+                .expect("failed to spawn dummy process"),
+        ),
+    );
+    drop(old);
+}
+
+/// Detect stale audio and silence, resetting state as needed.
+fn check_audio_health(vis: &mut VisualizerState, audio: &mut AudioState) {
+    // Zero buffers if no new samples recently
+    if audio.last_write.elapsed() > STALE_AUDIO_THRESHOLD {
+        audio.mono_buf.lock().unwrap().fill(0.0);
+        audio.stereo.0.lock().unwrap().fill(0.0);
+        audio.stereo.1.lock().unwrap().fill(0.0);
+    }
+
+    // Auto-restart tap if it died
+    if audio.capture.tap_exited() {
+        let should_restart = audio
+            .last_restart_attempt
+            .map(|t| t.elapsed() >= RESTART_COOLDOWN)
+            .unwrap_or(true);
+        if should_restart {
+            audio.last_restart_attempt = Some(Instant::now());
+            drop_capture(&mut audio.capture);
+            match start_audio(
+                &audio.mono_buf,
+                &audio.stereo,
+                Some(&audio.device_name),
+                &audio.last_write,
+            ) {
+                Ok((sr, handle)) => {
+                    audio.sample_rate = sr;
+                    audio.capture = handle;
+                    vis.reset_sensitivity();
+                }
+                Err(_) => {
+                    // Keep the dummy handle; we'll retry after cooldown
+                }
+            }
+        }
+    }
+
+    // Detect silence: zero smoothing state so bars fall via gravity
+    let buf = audio.mono_buf.lock().unwrap();
+    let rms = (buf.iter().map(|s| s * s).sum::<f32>() / buf.len() as f32).sqrt();
+    if rms < 1e-6 {
+        drop(buf);
+        vis.prev_bars.fill(0.0);
+        vis.prev_left.fill(0.0);
+        vis.prev_right.fill(0.0);
+        vis.reset_sensitivity();
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -205,34 +541,38 @@ fn main() -> Result<()> {
         cfg.bar_spacing = s.clamp(0, 4);
     }
 
-
     let mut mode = Mode::from_str(&cfg.mode);
 
     // Start audio capture
-    let mono_buf = audio::new_buffer(analysis::FFT_SIZE);
-    let stereo = audio::new_stereo_buffers(analysis::FFT_SIZE);
-    let last_write = audio::LastWriteTime::new();
     let now_playing = audio::new_now_playing();
-    let mut device_name = cli
-        .device
-        .clone()
-        .unwrap_or_else(|| audio::SYSTEM_AUDIO_LABEL.to_string());
-    let (mut sample_rate, mut capture) =
-        start_audio(&mono_buf, &stereo, cli.device.as_deref(), &last_write)?;
+    let mut audio = {
+        let mono_buf = audio::new_buffer(analysis::FFT_SIZE);
+        let stereo = audio::new_stereo_buffers(analysis::FFT_SIZE);
+        let last_write = audio::LastWriteTime::new();
+        let device_name = cli
+            .device
+            .clone()
+            .unwrap_or_else(|| audio::SYSTEM_AUDIO_LABEL.to_string());
+        let (sample_rate, capture) =
+            start_audio(&mono_buf, &stereo, cli.device.as_deref(), &last_write)?;
+        AudioState {
+            mono_buf,
+            stereo,
+            last_write,
+            device_name,
+            sample_rate,
+            capture,
+            last_restart_attempt: None,
+        }
+    };
 
-    // Poll now-playing in a background thread via osascript (separate process
-    // so TCC checks don't interfere with ScreenCaptureKit)
+    // Poll now-playing in a background thread via osascript
     audio::start_now_playing_poller(now_playing.clone(), Duration::from_secs(3));
 
     // Init terminal
     let mut terminal = render::init()?;
     let fps = cfg.fps.max(1);
     let frame_duration = Duration::from_millis(1000 / fps);
-    let mut desired_bars = MAX_BARS;
-    let mut num_bars = MIN_BARS;
-    let mut prev_bars: Vec<f32> = vec![0.0; num_bars];
-    let mut prev_left: Vec<f32> = vec![0.0; num_bars];
-    let mut prev_right: Vec<f32> = vec![0.0; num_bars];
     let low_freq = cfg.low_freq;
     let high_freq = cfg.high_freq;
     let themes = theme::load_themes();
@@ -243,7 +583,6 @@ fn main() -> Result<()> {
         .iter()
         .position(|t| t.name == cfg.theme)
         .unwrap_or(0);
-    let mut current_theme = &themes[theme_idx];
 
     let mut settings = render::Settings {
         smoothing: cfg.smoothing.clamp(0.0, 0.99),
@@ -256,28 +595,15 @@ fn main() -> Result<()> {
         sensitivity: cfg.sensitivity.clamp(10, 500),
     };
 
-    let analyzer = analysis::SpectrumAnalyzer::new();
-    let mut autosens = analysis::AutoSensitivity::new();
-    let mut autosens_l = analysis::AutoSensitivity::new();
-    let mut autosens_r = analysis::AutoSensitivity::new();
-
-
-    // Gravity for bar fall-off
-    let mut gravity = analysis::Gravity::new(GRAVITY_ACCEL);
-    let mut gravity_l = analysis::Gravity::new(GRAVITY_ACCEL);
-    let mut gravity_r = analysis::Gravity::new(GRAVITY_ACCEL);
+    let mut vis = VisualizerState::new();
 
     // FPS tracking
     let mut frame_count: u32 = 0;
     let mut fps_timer = Instant::now();
     let mut actual_fps: Option<u32> = None;
 
-    // Track frame time for frame-rate independent gravity
+    // Frame-rate independent timing
     let mut last_frame_time = Instant::now();
-
-    // Auto-restart: track when we last attempted a tap restart to avoid hammering
-    let mut last_restart_attempt: Option<Instant> = None;
-    const RESTART_COOLDOWN: Duration = Duration::from_secs(2);
 
     // Settings overlay state (None = closed)
     let mut settings_state: Option<render::SettingsState> = None;
@@ -293,172 +619,66 @@ fn main() -> Result<()> {
             fps_timer = Instant::now();
         }
 
-        // Compute max bars that fit the terminal width.
+        // Compute max bars that fit the terminal width
         let term_w = terminal.size()?.width.saturating_sub(2) as usize;
         let stride = settings.bar_width + settings.bar_spacing;
-        let max_fit = if stride > 0 { (term_w + settings.bar_spacing) / stride } else { term_w };
-        // Auto-fill up to desired_bars (user can reduce with Left arrow).
-        let effective_bars = desired_bars.min(max_fit).max(MIN_BARS);
-        if effective_bars != num_bars {
-            num_bars = effective_bars;
-            prev_bars = vec![0.0; num_bars];
-            prev_left = vec![0.0; num_bars];
-            prev_right = vec![0.0; num_bars];
-        }
+        let max_fit = if stride > 0 {
+            (term_w + settings.bar_spacing) / stride
+        } else {
+            term_w
+        };
+        let effective_bars = vis.desired_bars.min(max_fit).max(MIN_BARS);
+        vis.resize_bars(effective_bars);
 
-        // Input handling: settings overlay intercepts keys when open
-        if let Some(ref mut sstate) = settings_state {
-            if let Some(key) = render::poll_key(Duration::ZERO)? {
-                match sstate.handle_key(key, &mut settings, themes.len()) {
-                    render::SettingsAction::Close => {
-                        theme_idx = settings.theme_idx;
-                        current_theme = &themes[theme_idx];
-                        save_state(&mut cfg, &settings, &current_theme.name, &mode);
-                        settings_state = None;
-                    }
-                    render::SettingsAction::Quit => break,
-                    render::SettingsAction::None => {
-                        // Settings changed live — update theme in case it was cycled
-                        theme_idx = settings.theme_idx;
-                        current_theme = &themes[theme_idx];
-                    }
-                }
+        // Input handling
+        if settings_state.is_some() {
+            match handle_settings_input(
+                &mut settings_state,
+                &mut settings,
+                &themes,
+                &mut theme_idx,
+                &mut cfg,
+                &mode,
+            )? {
+                LoopAction::Quit => break,
+                LoopAction::Skip => continue,
+                LoopAction::Continue => {}
             }
         } else {
-            match render::poll_input(Duration::ZERO)? {
-                render::Action::Quit => break,
-                render::Action::CycleMode => {
-                    mode = mode.next();
-                    prev_bars = vec![0.0; num_bars];
-                    prev_left = vec![0.0; num_bars];
-                    prev_right = vec![0.0; num_bars];
-                    save_state(&mut cfg, &settings, &current_theme.name, &mode);
-                    continue;
-                }
-                render::Action::SelectDevice => {
-                    let devices = audio::list_devices()?;
-                    match render::device_menu(&mut terminal, &devices, current_theme)? {
-                        render::DeviceMenuResult::Selected(new_device) => {
-                            drop(capture);
-                            let (sr, handle) =
-                                start_audio(&mono_buf, &stereo, new_device.as_deref(), &last_write)?;
-                            sample_rate = sr;
-                            capture = handle;
-                            device_name =
-                                new_device.unwrap_or_else(|| audio::SYSTEM_AUDIO_LABEL.to_string());
-                            prev_bars = vec![0.0; num_bars];
-                            prev_left = vec![0.0; num_bars];
-                            prev_right = vec![0.0; num_bars];
-                            autosens = analysis::AutoSensitivity::new();
-                            autosens_l = analysis::AutoSensitivity::new();
-                            autosens_r = analysis::AutoSensitivity::new();
-                        }
-                        render::DeviceMenuResult::Quit => break,
-                        render::DeviceMenuResult::Cancelled => {}
-                    }
-                    continue;
-                }
-                render::Action::Settings => {
-                    settings_state = Some(render::SettingsState::new());
-                }
-                render::Action::Help => {
-                    render::help(&mut terminal, current_theme)?;
-                    continue;
-                }
-                render::Action::SensUp => {
-                    settings.sensitivity = (settings.sensitivity + SENS_STEP).min(500);
-                    save_state(&mut cfg, &settings, &current_theme.name, &mode);
-                    continue;
-                }
-                render::Action::SensDown => {
-                    settings.sensitivity = settings.sensitivity.saturating_sub(SENS_STEP).max(10);
-                    save_state(&mut cfg, &settings, &current_theme.name, &mode);
-                    continue;
-                }
-                render::Action::MoreBars => {
-                    desired_bars = (num_bars + BAR_STEP).min(max_fit).min(MAX_BARS);
-                    num_bars = desired_bars;
-                    prev_bars = vec![0.0; num_bars];
-                    prev_left = vec![0.0; num_bars];
-                    prev_right = vec![0.0; num_bars];
-                    continue;
-                }
-                render::Action::FewerBars => {
-                    desired_bars = num_bars.saturating_sub(BAR_STEP).max(MIN_BARS);
-                    num_bars = desired_bars;
-                    prev_bars = vec![0.0; num_bars];
-                    prev_left = vec![0.0; num_bars];
-                    prev_right = vec![0.0; num_bars];
-                    continue;
-                }
-                render::Action::None => {}
+            match handle_normal_input(
+                &mut vis,
+                &mut settings,
+                &mut settings_state,
+                &mut mode,
+                &mut terminal,
+                &themes,
+                theme_idx,
+                &mut cfg,
+                &mut audio,
+                max_fit,
+            )? {
+                LoopAction::Quit => break,
+                LoopAction::Skip => continue,
+                LoopAction::Continue => {}
             }
         }
 
         let dt = last_frame_time.elapsed().as_secs_f32().clamp(0.001, 0.1);
         last_frame_time = Instant::now();
 
-        // Detect stale audio: if the audio thread hasn't written new samples
-        // recently (e.g. ScreenCaptureKit connection lost), zero the buffers
-        // so we don't keep visualizing stale data.
-        if last_write.elapsed() > Duration::from_millis(100) {
-            mono_buf.lock().unwrap().fill(0.0);
-            stereo.0.lock().unwrap().fill(0.0);
-            stereo.1.lock().unwrap().fill(0.0);
-        }
+        // Audio health checks (stale data, tap crashes, silence)
+        check_audio_health(&mut vis, &mut audio);
 
-        // Auto-restart tap if it died (e.g. macOS revoked Screen Recording)
-        if capture.tap_exited() {
-            let should_restart = last_restart_attempt
-                .map(|t| t.elapsed() >= RESTART_COOLDOWN)
-                .unwrap_or(true);
-            if should_restart {
-                last_restart_attempt = Some(Instant::now());
-                drop(capture);
-                match start_audio(&mono_buf, &stereo, Some(&device_name), &last_write) {
-                    Ok((sr, handle)) => {
-                        sample_rate = sr;
-                        capture = handle;
-                        autosens = analysis::AutoSensitivity::new();
-                        autosens_l = analysis::AutoSensitivity::new();
-                        autosens_r = analysis::AutoSensitivity::new();
-                    }
-                    Err(_) => {
-                        // Create a dummy handle so we keep looping and retry later.
-                        // Use a no-op child that's already exited.
-                        capture = audio::CaptureHandle::Tap(
-                            std::process::Command::new("true")
-                                .spawn()
-                                .expect("failed to spawn dummy process"),
-                        );
-                    }
-                }
-            }
-        }
-
-        // Detect silence: if the buffer's energy is negligible, zero the
-        // smoothing state so bars fall via gravity instead of freezing.
-        {
-            let buf = mono_buf.lock().unwrap();
-            let rms = (buf.iter().map(|s| s * s).sum::<f32>() / buf.len() as f32).sqrt();
-            if rms < 1e-6 {
-                drop(buf);
-                prev_bars.fill(0.0);
-                prev_left.fill(0.0);
-                prev_right.fill(0.0);
-                autosens = analysis::AutoSensitivity::new();
-                autosens_l = analysis::AutoSensitivity::new();
-                autosens_r = analysis::AutoSensitivity::new();
-            }
-        }
-
-        // Build status line: device name + now playing track (if available)
+        // Build status line
         let status = match now_playing.lock().unwrap().as_deref() {
-            Some(track) => format!("{} | {}", device_name, track),
-            None => device_name.clone(),
+            Some(track) => format!("{} | {}", audio.device_name, track),
+            None => audio.device_name.clone(),
         };
 
-        // Prepare render data outside the draw closure
+        let current_theme = &themes[theme_idx];
+
+        // Prepare render data
+        #[allow(clippy::enum_variant_names)]
         enum RenderData {
             Spectrum(Vec<f32>),
             Stereo(Vec<f32>, Vec<f32>),
@@ -468,105 +688,49 @@ fn main() -> Result<()> {
 
         let render_data = match mode {
             Mode::Spectrum => {
-                let samples = {
-                    let buf = mono_buf.lock().unwrap();
-                    buf.clone()
-                };
-                let magnitudes = analyzer.spectrum(&samples);
-                let bars = analysis::bin_spectrum(
-                    &magnitudes, num_bars, sample_rate, low_freq, high_freq,
+                let samples = audio.mono_buf.lock().unwrap().clone();
+                let bars = vis.process_spectrum(
+                    &samples, audio.sample_rate, low_freq, high_freq, &settings, dt,
                 );
-
-                let mut smoothed = analysis::smooth(&prev_bars, &bars, settings.smoothing, dt);
-                if settings.monstercat {
-                    analysis::monstercat(&mut smoothed, MONSTERCAT_STRENGTH);
-                }
-                if settings.noise_floor > 0.0 {
-                    analysis::noise_gate(&mut smoothed, settings.noise_floor);
-                }
-                autosens.apply(&mut smoothed, dt);
-                let sens = settings.sensitivity as f32 / 100.0;
-                if sens != 1.0 {
-                    for v in smoothed.iter_mut() { *v *= sens; }
-                }
-                prev_bars = smoothed.clone();
-                gravity.apply(&mut smoothed, dt);
-                RenderData::Spectrum(smoothed)
+                RenderData::Spectrum(bars)
             }
             Mode::Stereo => {
-                let left_samples = {
-                    let buf = stereo.0.lock().unwrap();
-                    buf.clone()
-                };
-                let right_samples = {
-                    let buf = stereo.1.lock().unwrap();
-                    buf.clone()
-                };
-
-                let left_mag = analyzer.spectrum(&left_samples);
-                let right_mag = analyzer.spectrum(&right_samples);
-
-                let left_bars = analysis::bin_spectrum(
-                    &left_mag, num_bars, sample_rate, low_freq, high_freq,
+                let left_samples = audio.stereo.0.lock().unwrap().clone();
+                let right_samples = audio.stereo.1.lock().unwrap().clone();
+                let (left, right) = vis.process_stereo(
+                    &left_samples, &right_samples, audio.sample_rate, low_freq, high_freq, &settings, dt,
                 );
-                let right_bars = analysis::bin_spectrum(
-                    &right_mag, num_bars, sample_rate, low_freq, high_freq,
-                );
-
-                let mut smooth_l =
-                    analysis::smooth(&prev_left, &left_bars, settings.smoothing, dt);
-                let mut smooth_r =
-                    analysis::smooth(&prev_right, &right_bars, settings.smoothing, dt);
-
-                if settings.monstercat {
-                    analysis::monstercat(&mut smooth_l, MONSTERCAT_STRENGTH);
-                    analysis::monstercat(&mut smooth_r, MONSTERCAT_STRENGTH);
-                }
-
-                if settings.noise_floor > 0.0 {
-                    analysis::noise_gate(&mut smooth_l, settings.noise_floor);
-                    analysis::noise_gate(&mut smooth_r, settings.noise_floor);
-                }
-
-                autosens_l.apply(&mut smooth_l, dt);
-                autosens_r.apply(&mut smooth_r, dt);
-                let sens = settings.sensitivity as f32 / 100.0;
-                if sens != 1.0 {
-                    for v in smooth_l.iter_mut() { *v *= sens; }
-                    for v in smooth_r.iter_mut() { *v *= sens; }
-                }
-                prev_left = smooth_l.clone();
-                prev_right = smooth_r.clone();
-                gravity_l.apply(&mut smooth_l, dt);
-                gravity_r.apply(&mut smooth_r, dt);
-                RenderData::Stereo(smooth_l, smooth_r)
+                RenderData::Stereo(left, right)
             }
             Mode::Wave => {
-                let samples = {
-                    let buf = mono_buf.lock().unwrap();
-                    buf.clone()
-                };
+                let samples = audio.mono_buf.lock().unwrap().clone();
                 RenderData::Wave(samples)
             }
             Mode::Scope => {
-                let samples = {
-                    let buf = mono_buf.lock().unwrap();
-                    buf.clone()
-                };
+                let samples = audio.mono_buf.lock().unwrap().clone();
                 RenderData::Scope(samples)
             }
         };
 
         // Single terminal.draw call: visualizer + optional settings overlay
+        let ctx = render::RenderContext {
+            theme: current_theme,
+            device: &status,
+            gradient_by_position: settings.gradient_by_position,
+            actual_fps,
+            bar_width: settings.bar_width,
+            bar_spacing: settings.bar_spacing,
+            sensitivity: settings.sensitivity,
+        };
         let settings_ref = &settings;
         let sstate_ref = &settings_state;
         terminal.draw(|frame| {
             match &render_data {
                 RenderData::Spectrum(smoothed) => {
-                    render::render_spectrum(frame, smoothed, current_theme, &status, settings_ref.gradient_by_position, actual_fps, settings_ref.bar_width, settings_ref.bar_spacing, settings_ref.sensitivity);
+                    render::render_spectrum(frame, smoothed, &ctx);
                 }
                 RenderData::Stereo(smooth_l, smooth_r) => {
-                    render::render_stereo(frame, smooth_l, smooth_r, current_theme, &status, settings_ref.gradient_by_position, actual_fps, settings_ref.bar_width, settings_ref.bar_spacing, settings_ref.sensitivity);
+                    render::render_stereo(frame, smooth_l, smooth_r, &ctx);
                 }
                 RenderData::Wave(samples) => {
                     render::render_wave(frame, samples, current_theme, &status, actual_fps);

@@ -515,26 +515,31 @@ pub fn help(terminal: &mut Term, theme: &Theme) -> Result<()> {
     }
 }
 
+/// Bundled parameters for spectrum/stereo rendering.
+pub struct RenderContext<'a> {
+    pub theme: &'a Theme,
+    pub device: &'a str,
+    pub gradient_by_position: bool,
+    pub actual_fps: Option<u32>,
+    pub bar_width: usize,
+    pub bar_spacing: usize,
+    pub sensitivity: u32,
+}
+
 /// Draw spectrum bars using Unicode block elements (▁▂▃▄▅▆▇█) for 1/8th-cell
 /// vertical resolution.
-#[allow(clippy::too_many_arguments)]
 pub fn render_spectrum(
     frame: &mut ratatui::Frame,
     bars: &[f32],
-    theme: &Theme,
-    device: &str,
-    gradient_by_position: bool,
-    actual_fps: Option<u32>,
-    bar_width: usize,
-    bar_spacing: usize,
-    sensitivity: u32,
+    ctx: &RenderContext,
 ) {
+    let theme = ctx.theme;
     let theme_name = &theme.name;
     let num_bars = bars.len();
-    let fps_str = actual_fps.map(|f| format!(" {}fps", f)).unwrap_or_default();
-    let sens_str = format!(" {}% sensitivity", sensitivity);
+    let fps_str = ctx.actual_fps.map(|f| format!(" {}fps", f)).unwrap_or_default();
+    let sens_str = format!(" {}% sensitivity", ctx.sensitivity);
     let title = format!(" termwave — spectrum [{}] ({} bars{}){} ", theme_name, num_bars, sens_str, fps_str);
-    let bottom = format!(" {} | ? help ", device);
+    let bottom = format!(" {} | ? help ", ctx.device);
 
     {
         let area = frame.area();
@@ -549,10 +554,10 @@ pub fn render_spectrum(
 
         let buf = frame.buffer_mut();
         let max_val = bars.iter().cloned().fold(0.0f32, f32::max).max(0.001);
-        let bar_w = bar_width;
-        let stride = bar_w + bar_spacing;
+        let bar_w = ctx.bar_width;
+        let stride = bar_w + ctx.bar_spacing;
         // Center bars within the available width
-        let total_w = if num_bars > 0 { num_bars * bar_w + (num_bars - 1) * bar_spacing } else { 0 };
+        let total_w = if num_bars > 0 { num_bars * bar_w + (num_bars - 1) * ctx.bar_spacing } else { 0 };
         let x_offset = inner.x + ((inner.width as usize).saturating_sub(total_w) / 2) as u16;
 
         let height = inner.height as f32;
@@ -569,7 +574,7 @@ pub fn render_spectrum(
             let x_end = (x_start + bar_w as u16).min(inner.x + inner.width);
 
             // Horizontal position for gradient_by_position mode
-            let h_color = if gradient_by_position {
+            let h_color = if ctx.gradient_by_position {
                 Some(theme.bar_color(i as f32 / (num_bars - 1).max(1) as f32))
             } else {
                 None
@@ -664,25 +669,19 @@ fn render_wave_inner(frame: &mut ratatui::Frame, samples: &[f32], title: &str, b
 
 /// Draw stereo spectrum: left channel bars grow up from center, right channel grows down.
 /// Uses Unicode block elements for the upper half (▁▂▃▄▅▆▇█) and full blocks for the lower half.
-#[allow(clippy::too_many_arguments)]
 pub fn render_stereo(
     frame: &mut ratatui::Frame,
     left_bars: &[f32],
     right_bars: &[f32],
-    theme: &Theme,
-    device: &str,
-    gradient_by_position: bool,
-    actual_fps: Option<u32>,
-    bar_width: usize,
-    bar_spacing: usize,
-    sensitivity: u32,
+    ctx: &RenderContext,
 ) {
+    let theme = ctx.theme;
     let theme_name = &theme.name;
     let num_bars = left_bars.len();
-    let fps_str = actual_fps.map(|f| format!(" {}fps", f)).unwrap_or_default();
-    let sens_str = format!(" {}% sensitivity", sensitivity);
+    let fps_str = ctx.actual_fps.map(|f| format!(" {}fps", f)).unwrap_or_default();
+    let sens_str = format!(" {}% sensitivity", ctx.sensitivity);
     let title = format!(" termwave — stereo [{}] ({} bars{}){} ", theme_name, num_bars, sens_str, fps_str);
-    let bottom = format!(" {} | ? help ", device);
+    let bottom = format!(" {} | ? help ", ctx.device);
 
     {
         let area = frame.area();
@@ -698,9 +697,9 @@ pub fn render_stereo(
         let buf = frame.buffer_mut();
         let left_max = left_bars.iter().cloned().fold(0.0f32, f32::max).max(0.001);
         let right_max = right_bars.iter().cloned().fold(0.0f32, f32::max).max(0.001);
-        let bar_w = bar_width;
-        let stride = bar_w + bar_spacing;
-        let total_w = if num_bars > 0 { num_bars * bar_w + (num_bars - 1) * bar_spacing } else { 0 };
+        let bar_w = ctx.bar_width;
+        let stride = bar_w + ctx.bar_spacing;
+        let total_w = if num_bars > 0 { num_bars * bar_w + (num_bars - 1) * ctx.bar_spacing } else { 0 };
         let x_offset = inner.x + ((inner.width as usize).saturating_sub(total_w) / 2) as u16;
 
         // Split inner area into upper half (left channel) and lower half (right channel)
@@ -726,7 +725,7 @@ pub fn render_stereo(
             let x_start = x_offset + (i * stride) as u16;
             let x_end = (x_start + bar_w as u16).min(inner.x + inner.width);
 
-            let h_color = if gradient_by_position {
+            let h_color = if ctx.gradient_by_position {
                 Some(theme.bar_color(i as f32 / (num_bars - 1).max(1) as f32))
             } else {
                 None
@@ -774,7 +773,7 @@ pub fn render_stereo(
             let x_start = x_offset + (i * stride) as u16;
             let x_end = (x_start + bar_w as u16).min(inner.x + inner.width);
 
-            let h_color = if gradient_by_position {
+            let h_color = if ctx.gradient_by_position {
                 Some(theme.bar_color(i as f32 / (num_bars - 1).max(1) as f32))
             } else {
                 None
