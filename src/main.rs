@@ -104,9 +104,7 @@ impl Mode {
 
 const DEFAULT_SAMPLE_RATE: u32 = 48000;
 const MONSTERCAT_STRENGTH: f32 = 0.75;
-const MIN_BARS: usize = 8;
-const MAX_BARS: usize = 256;
-const BAR_STEP: usize = 8;
+const MIN_BARS: usize = 4;
 const SENS_STEP: u32 = 10;
 /// Gravity acceleration in units/s². At 60fps (dt≈0.017s), a bar at height 1.0
 /// takes about 0.25s to fall — similar feel to the old per-frame 0.01 value.
@@ -129,7 +127,6 @@ struct AudioState {
 
 /// Bundles all mutable DSP and bar state for the visualizer.
 struct VisualizerState {
-    desired_bars: usize,
     num_bars: usize,
     prev_bars: Vec<f32>,
     prev_left: Vec<f32>,
@@ -146,7 +143,6 @@ struct VisualizerState {
 impl VisualizerState {
     fn new() -> Self {
         Self {
-            desired_bars: MAX_BARS,
             num_bars: MIN_BARS,
             prev_bars: vec![0.0; MIN_BARS],
             prev_left: vec![0.0; MIN_BARS],
@@ -310,7 +306,6 @@ fn save_state(
     cfg.monstercat = settings.monstercat;
     cfg.noise_floor = settings.noise_floor;
     cfg.theme = theme_name.to_string();
-    cfg.bars = 0;
     cfg.mode = mode.as_str().to_string();
 
     cfg.gradient_by_position = settings.gradient_by_position;
@@ -367,7 +362,6 @@ fn handle_normal_input(
     theme_idx: usize,
     cfg: &mut config::Config,
     audio: &mut AudioState,
-    max_fit: usize,
 ) -> Result<LoopAction> {
     match render::poll_input(Duration::ZERO)? {
         render::Action::Quit => return Ok(LoopAction::Quit),
@@ -418,15 +412,15 @@ fn handle_normal_input(
             return Ok(LoopAction::Skip);
         }
         render::Action::MoreBars => {
-            vis.desired_bars = (vis.num_bars + BAR_STEP).min(max_fit).min(MAX_BARS);
-            vis.num_bars = vis.desired_bars;
-            vis.reset_bars();
+            // Narrower bars = more bars on screen
+            settings.bar_width = settings.bar_width.saturating_sub(1).max(1);
+            save_state(cfg, settings, &themes[theme_idx].name, mode);
             return Ok(LoopAction::Skip);
         }
         render::Action::FewerBars => {
-            vis.desired_bars = vis.num_bars.saturating_sub(BAR_STEP).max(MIN_BARS);
-            vis.num_bars = vis.desired_bars;
-            vis.reset_bars();
+            // Wider bars = fewer bars on screen
+            settings.bar_width = (settings.bar_width + 1).min(8);
+            save_state(cfg, settings, &themes[theme_idx].name, mode);
             return Ok(LoopAction::Skip);
         }
         render::Action::None => {}
@@ -619,16 +613,16 @@ fn main() -> Result<()> {
             fps_timer = Instant::now();
         }
 
-        // Compute max bars that fit the terminal width
+        // Compute bar count from terminal width.
+        // Bar width and spacing are authoritative; count fills the terminal.
         let term_w = terminal.size()?.width.saturating_sub(2) as usize;
         let stride = settings.bar_width + settings.bar_spacing;
-        let max_fit = if stride > 0 {
+        let num_bars = if stride > 0 {
             (term_w + settings.bar_spacing) / stride
         } else {
             term_w
-        };
-        let effective_bars = vis.desired_bars.min(max_fit).max(MIN_BARS);
-        vis.resize_bars(effective_bars);
+        }.max(MIN_BARS);
+        vis.resize_bars(num_bars);
 
         // Input handling
         if settings_state.is_some() {
@@ -655,7 +649,6 @@ fn main() -> Result<()> {
                 theme_idx,
                 &mut cfg,
                 &mut audio,
-                max_fit,
             )? {
                 LoopAction::Quit => break,
                 LoopAction::Skip => continue,

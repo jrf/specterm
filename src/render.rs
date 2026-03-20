@@ -440,7 +440,7 @@ pub fn help(terminal: &mut Term, theme: &Theme) -> Result<()> {
         ("s", "Settings (theme, smoothing, noise, bar width/spacing)"),
         ("m", "Cycle visualization mode"),
         ("Up / Down", "Increase / decrease sensitivity"),
-        ("Right / Left", "More / fewer bars"),
+        ("Right / Left", "Wider / narrower bars"),
         ("q / Esc", "Quit"),
         ("Ctrl+C", "Quit"),
     ];
