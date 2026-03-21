@@ -50,7 +50,12 @@ impl SpectrumAnalyzer {
         let mut buffer: Vec<Complex<f32>> = samples
             .iter()
             .take(window)
-            .map(|&s| Complex { re: s, im: 0.0 })
+            .enumerate()
+            .map(|(i, &s)| {
+                // Hann window: tapers edges to zero, reducing spectral leakage
+                let w = 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / (window - 1) as f32).cos());
+                Complex { re: s * w, im: 0.0 }
+            })
             .collect();
         buffer.resize(fft_size, Complex { re: 0.0, im: 0.0 });
         fft.process(&mut buffer);
