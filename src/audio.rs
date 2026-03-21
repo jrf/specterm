@@ -143,7 +143,7 @@ pub fn start_capture(
                 move |data: &[i16], _: &cpal::InputCallbackInfo| {
                     let floats: Vec<f32> = data
                         .iter()
-                        .map(|&s| s as f32 / i16::MAX as f32)
+                        .map(|&s| s as f32 / 32768.0)
                         .collect();
                     write_samples(&mb, &st, &floats, channels, &lw);
                 },
