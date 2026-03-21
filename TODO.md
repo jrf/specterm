@@ -1,18 +1,18 @@
 # termwave — TODO
 
 ## Now
-- [ ] Peak hold indicators on spectrum bars
-- [ ] Braille character rendering for sub-cell resolution
 
 ## Next
-- [ ] Frequency axis labels (Hz)
-- [ ] FPS / latency debug overlay (`--debug` flag)
+- [ ] Equalizer curve tuning — current `ln(freq/low_freq)+1.0` may over/under-boost; needs listening tests #improvement
+- [ ] FPS / latency debug overlay (`--debug` flag) #feature
 
 ## Later
-- [ ] Linux support (PulseAudio/PipeWire monitor sources for system audio capture)
-- [ ] Fallback to virtual audio device (BlackHole) if ScreenCaptureKit unavailable
+- [ ] Peak hold indicators on spectrum bars #feature
+- [ ] Linux support (PulseAudio/PipeWire monitor sources for system audio capture) #feature
+- [ ] Fallback to virtual audio device (BlackHole) if ScreenCaptureKit unavailable #feature
 
 ## Scrapped
+- Braille character rendering — block elements (▁▂▃▄▅▆▇█) already give 8 subdivisions per cell; braille only gives 4 vertically. Would only help wave/scope modes.
 - Hann window before FFT — removed because it attenuates samples at buffer edges, adding latency for precision that's invisible in a visualizer. Monstercat smoothing and the equalizer curve handle the artifacts.
 
 ## Done
