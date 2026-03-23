@@ -118,12 +118,11 @@ impl Mode {
 }
 
 const DEFAULT_SAMPLE_RATE: u32 = 48000;
-const MONSTERCAT_STRENGTH: f32 = 0.75;
+/// Monstercat falloff parameter. The divisor base is `param * 1.5`.
+/// 0.89 produces falloff of ~0.75 per bar (equivalent to our old strength=0.75).
+const MONSTERCAT_PARAM: f32 = 0.89;
 const MIN_BARS: usize = 4;
 const SENS_STEP: u32 = 10;
-/// Gravity acceleration in units/s². At 60fps (dt≈0.017s), a bar at height 1.0
-/// takes about 0.25s to fall — similar feel to the old per-frame 0.01 value.
-const GRAVITY_ACCEL: f32 = 8.0;
 /// Cooldown between tap restart attempts.
 const RESTART_COOLDOWN: Duration = Duration::from_secs(2);
 /// Audio is considered stale after this long without new samples.
@@ -165,9 +164,9 @@ impl VisualizerState {
             autosens: analysis::AutoSensitivity::new(),
             autosens_l: analysis::AutoSensitivity::new(),
             autosens_r: analysis::AutoSensitivity::new(),
-            gravity: analysis::Gravity::new(GRAVITY_ACCEL),
-            gravity_l: analysis::Gravity::new(GRAVITY_ACCEL),
-            gravity_r: analysis::Gravity::new(GRAVITY_ACCEL),
+            gravity: analysis::Gravity::new(),
+            gravity_l: analysis::Gravity::new(),
+            gravity_r: analysis::Gravity::new(),
             analyzer: analysis::SpectrumAnalyzer::new(),
         }
     }
@@ -194,42 +193,46 @@ impl VisualizerState {
         }
     }
 
-    /// Run the shared DSP pipeline on a single channel: monstercat → noise gate →
-    /// auto-sensitivity → manual sensitivity → smooth → gravity.
+    /// Run the shared DSP pipeline on a single channel:
     ///
-    /// Smoothing runs after normalization so that `prev` and `current` are both
-    /// in the same 0.0–1.0 scale, avoiding the scale mismatch that previously
-    /// caused sluggish transient response.
+    /// noise_gate → sens·scale → gravity → integral → overshoot+adjust → monstercat
     fn process_channel(
-        prev: &mut Vec<f32>,
+        mem: &mut Vec<f32>,
         raw_bars: &[f32],
         settings: &render::Settings,
-        dt: f32,
+        framerate: f32,
         autosens: &mut analysis::AutoSensitivity,
         gravity: &mut analysis::Gravity,
     ) -> Vec<f32> {
         let mut bars = raw_bars.to_vec();
-        if settings.monstercat {
-            analysis::monstercat(&mut bars, MONSTERCAT_STRENGTH);
-        }
+        let silence = bars.iter().all(|&b| b == 0.0);
         if settings.noise_floor > 0.0 {
             analysis::noise_gate(&mut bars, settings.noise_floor);
         }
-        autosens.apply(&mut bars, dt);
+        // Phase 1: scale by auto-sensitivity + manual sensitivity
+        autosens.scale(&mut bars);
         let sens = settings.sensitivity as f32 / 100.0;
         if sens != 1.0 {
             for v in bars.iter_mut() {
                 *v *= sens;
             }
         }
-        // Smooth after normalization so both prev and bars are in 0.0–1.0 scale
-        let mut smoothed = analysis::smooth(prev, &bars, settings.smoothing, dt);
-        *prev = smoothed.clone();
-        gravity.apply(&mut smoothed, dt);
-        smoothed
+        // Gravity (parabolic falloff)
+        let noise_reduction = settings.smoothing;
+        gravity.apply(&mut bars, framerate, noise_reduction);
+        // Integral smoothing (additive memory accumulation)
+        analysis::smooth(mem, &mut bars, noise_reduction, framerate);
+        // Phase 2: clamp overshoots and adjust sensitivity for next frame
+        autosens.adjust(&mut bars, framerate, silence);
+        // Monstercat runs after all other processing, on normalized bars
+        if settings.monstercat {
+            analysis::monstercat(&mut bars, MONSTERCAT_PARAM);
+        }
+        bars
     }
 
     /// Process mono spectrum and return render-ready bars.
+    #[allow(clippy::too_many_arguments)]
     fn process_spectrum(
         &mut self,
         samples: &[f32],
@@ -237,10 +240,11 @@ impl VisualizerState {
         low_freq: f32,
         high_freq: f32,
         settings: &render::Settings,
-        dt: f32,
+        framerate: f32,
+        eq_gains: &[f32],
     ) -> Vec<f32> {
         let (bass_mag, main_mag) = self.analyzer.spectrum_dual(samples);
-        let bars = analysis::bin_spectrum(
+        let mut bars = analysis::bin_spectrum(
             &bass_mag,
             &main_mag,
             self.num_bars,
@@ -248,11 +252,12 @@ impl VisualizerState {
             low_freq,
             high_freq,
         );
+        analysis::apply_eq(&mut bars, eq_gains);
         Self::process_channel(
             &mut self.prev_bars,
             &bars,
             settings,
-            dt,
+            framerate,
             &mut self.autosens,
             &mut self.gravity,
         )
@@ -268,11 +273,12 @@ impl VisualizerState {
         low_freq: f32,
         high_freq: f32,
         settings: &render::Settings,
-        dt: f32,
+        framerate: f32,
+        eq_gains: &[f32],
     ) -> (Vec<f32>, Vec<f32>) {
         let (left_bass, left_main) = self.analyzer.spectrum_dual(left_samples);
         let (right_bass, right_main) = self.analyzer.spectrum_dual(right_samples);
-        let left_bars = analysis::bin_spectrum(
+        let mut left_bars = analysis::bin_spectrum(
             &left_bass,
             &left_main,
             self.num_bars,
@@ -280,7 +286,7 @@ impl VisualizerState {
             low_freq,
             high_freq,
         );
-        let right_bars = analysis::bin_spectrum(
+        let mut right_bars = analysis::bin_spectrum(
             &right_bass,
             &right_main,
             self.num_bars,
@@ -288,12 +294,14 @@ impl VisualizerState {
             low_freq,
             high_freq,
         );
+        analysis::apply_eq(&mut left_bars, eq_gains);
+        analysis::apply_eq(&mut right_bars, eq_gains);
 
         let smooth_l = Self::process_channel(
             &mut self.prev_left,
             &left_bars,
             settings,
-            dt,
+            framerate,
             &mut self.autosens_l,
             &mut self.gravity_l,
         );
@@ -301,7 +309,7 @@ impl VisualizerState {
             &mut self.prev_right,
             &right_bars,
             settings,
-            dt,
+            framerate,
             &mut self.autosens_r,
             &mut self.gravity_r,
         );
@@ -351,6 +359,7 @@ fn save_state(
     cfg.bar_width = settings.bar_width;
     cfg.bar_spacing = settings.bar_spacing;
     cfg.sensitivity = settings.sensitivity;
+    cfg.eq = settings.eq.clone();
 
     let _ = config::save(cfg);
 }
@@ -434,7 +443,7 @@ fn handle_normal_input(
             return Ok(LoopAction::Skip);
         }
         render::Action::Settings => {
-            *settings_state = Some(render::SettingsState::new());
+            *settings_state = Some(render::SettingsState::new(settings.eq.len()));
         }
         render::Action::Help => {
             render::help(terminal, &themes[theme_idx])?;
@@ -633,6 +642,7 @@ fn main() -> Result<()> {
         bar_width: cfg.bar_width.clamp(1, 8),
         bar_spacing: cfg.bar_spacing.clamp(0, 4),
         sensitivity: cfg.sensitivity.clamp(10, 500),
+        eq: cfg.eq.clone(),
     };
 
     let mut vis = VisualizerState::new();
@@ -732,16 +742,18 @@ fn main() -> Result<()> {
         let render_data = match mode {
             Mode::Spectrum => {
                 let samples = audio.mono_buf.lock().unwrap().clone();
+                let framerate = 1.0 / dt;
                 let bars = vis.process_spectrum(
-                    &samples, audio.sample_rate, low_freq, high_freq, &settings, dt,
+                    &samples, audio.sample_rate, low_freq, high_freq, &settings, framerate, &settings.eq,
                 );
                 RenderData::Spectrum(bars)
             }
             Mode::Stereo => {
                 let left_samples = audio.stereo.0.lock().unwrap().clone();
                 let right_samples = audio.stereo.1.lock().unwrap().clone();
+                let framerate = 1.0 / dt;
                 let (left, right) = vis.process_stereo(
-                    &left_samples, &right_samples, audio.sample_rate, low_freq, high_freq, &settings, dt,
+                    &left_samples, &right_samples, audio.sample_rate, low_freq, high_freq, &settings, framerate, &settings.eq,
                 );
                 RenderData::Stereo(left, right)
             }

@@ -3,6 +3,7 @@
 ## Now
 
 ## Next
+- [ ] Auto-sensitivity cap — `sens` grows unbounded for quiet audio (1% per frame compounds to 392x in 10s); add a max cap and possibly raise default `noise_floor` above 0.0 #bug
 - [ ] Equalizer curve tuning — current `ln(freq/low_freq)+1.0` may over/under-boost; needs listening tests #improvement
 - [ ] FPS / latency debug overlay (`--debug` flag) #feature
 
@@ -12,41 +13,16 @@
 - [ ] Fallback to virtual audio device (BlackHole) if ScreenCaptureKit unavailable #feature
 
 ## Scrapped
-- Braille character rendering — block elements (▁▂▃▄▅▆▇█) already give 8 subdivisions per cell; braille only gives 4 vertically. Would only help wave/scope modes.
-- Hann window before FFT — removed because it attenuates samples at buffer edges, adding latency for precision that's invisible in a visualizer. Monstercat smoothing and the equalizer curve handle the artifacts.
+- Braille rendering — block elements (▁▂▃▄▅▆▇█) give 8 subdivisions per cell vs braille's 4 vertically. Only would help wave/scope modes.
 
 ## Done
-- [x] Dual-resolution FFT (4096 for bass, 2048→4096 zero-padded for mids/highs) #improvement
-- [x] Asymmetric auto-sensitivity: fast attack, slow multiplicative recovery #improvement
-- [x] Narrower default frequency range (50–10000 Hz) #improvement
-- [x] Frequency equalizer curve to compensate for FFT high-frequency roll-off #improvement
-- [x] Fix smoothing scale mismatch: moved smoothing after auto-sensitivity normalization #bug
-- [x] Monstercat smoothing on by default #improvement
-- [x] Settings overlay uses 80% terminal width (min 40 cols) instead of 50% #bug
-- [x] Left/right arrows toggle Monstercat in settings overlay #bug
-- [x] Faster gravity fall-off (5.0 → 8.0 accel) for snappier visual response #improvement
-- [x] Fix mic audio bleeding into system capture after device switch — explicitly pause cpal stream before drop #bug
-- [x] Fix orphaned `termwave-tap` process after sleep/wake or unclean shutdown — watchdog timer in tap + signal handler in Rust #bug
-- [x] Refactor: extract `VisualizerState`, `AudioState`, `RenderContext` structs; deduplicate DSP pipeline and buffer resets; break up 432-line main() into focused functions #refactor
-- [x] Audio capture: open default input device with cpal, write samples to shared ring buffer
-- [x] Spectrum rendering: draw frequency bars using ratatui BarChart
-- [x] Wire main loop: audio thread -> ring buffer -> FFT -> render at ~30fps
-- [x] Handle terminal resize gracefully
-- [x] Quit on `q`, Esc, or Ctrl+C with clean terminal restore
-- [x] Logarithmic frequency binning (more bars for bass, fewer for treble)
-- [x] Frame smoothing (exponential decay between frames)
-- [x] Color gradient on spectrum bars
-- [x] Waveform mode: plot amplitude across terminal width
-- [x] Oscilloscope mode: zero-crossing triggered waveform display
-- [x] ScreenCaptureKit integration (macOS 13+) for capturing system audio output
-- [x] Device enumeration and selection via `--device` flag / `--list-devices`
-- [x] Runtime device switching via `d` keybinding
-- [x] Configurable color themes (8 built-in: classic, fire, ocean, purple, matrix, synthwave, tokyo-night-moon, mono)
-- [x] Externalize theme colors to TOML files in `~/.config/termwave/themes/`
-- [x] Stereo mode: mirrored L/R bars growing up and down from center with half-cell precision
-- [x] Now-playing Apple Music track display in status bar
-- [x] Bar width and spacing customization (settings menu + CLI flags)
-- [x] Sensitivity control with title bar display
-- [x] Config persistence to `~/.config/termwave/config.toml`
-- [x] Theme-aware UI: all menus, borders, titles, and overlays use the current theme's colors
-- [x] Non-blocking settings overlay: settings panel renders at 50% terminal size with live visualizer behind it, changes apply in real time
+- [x] Core audio capture and spectrum rendering with FFT pipeline #feature
+- [x] Dual-resolution FFT and logarithmic frequency binning #improvement
+- [x] Waveform, oscilloscope, and stereo visualizer modes #feature
+- [x] ScreenCaptureKit system audio capture (`termwave-tap`) #feature
+- [x] Runtime device switching and enumeration #feature
+- [x] TOML-based theme system with 8 built-in themes #feature
+- [x] Non-blocking settings overlay with live preview #feature
+- [x] Auto-sensitivity, monstercat smoothing, gravity fall-off #improvement
+- [x] Config persistence and theme-aware UI #feature
+- [x] Now-playing Apple Music track display #feature

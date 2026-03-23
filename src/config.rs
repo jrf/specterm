@@ -24,6 +24,8 @@ pub struct Config {
     pub bar_spacing: usize,
     /// Sensitivity in percent (100 = normal).
     pub sensitivity: u32,
+    /// Per-band equalizer gains (evenly distributed across frequency range).
+    pub eq: Vec<f32>,
 }
 
 impl Default for Config {
@@ -41,6 +43,7 @@ impl Default for Config {
             bar_width: 2,
             bar_spacing: 1,
             sensitivity: 100,
+            eq: vec![1.0, 1.0, 1.0, 1.0, 1.0],
         }
     }
 }
@@ -96,6 +99,7 @@ fn add_comments(toml: &str) -> String {
         ("bar_width =", "# Width of each bar in terminal columns (1-8)"),
         ("bar_spacing =", "# Gap between bars in terminal columns (0-4)"),
         ("sensitivity =", "# Sensitivity in percent (100 = normal, higher = louder)"),
+        ("eq =", "# Per-band equalizer gains (evenly distributed across frequency range).\n# Default [1.0, 1.0, 1.0, 1.0, 1.0] = flat. Values > 1.0 boost, < 1.0 cut."),
     ];
 
     let mut result = String::with_capacity(toml.len() * 2);

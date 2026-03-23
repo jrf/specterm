@@ -198,6 +198,8 @@ pub struct Settings {
     pub bar_spacing: usize,
     /// Sensitivity in percent (100 = normal).
     pub sensitivity: u32,
+    /// Per-band equalizer gains.
+    pub eq: Vec<f32>,
 }
 
 /// Non-blocking settings overlay state.
@@ -217,8 +219,8 @@ pub enum SettingsAction {
 }
 
 impl SettingsState {
-    pub fn new() -> Self {
-        Self { selected: 0, num_items: 8 }
+    pub fn new(num_eq_bands: usize) -> Self {
+        Self { selected: 0, num_items: 8 + num_eq_bands }
     }
 
     /// Handle a key event. Mutates settings in place, returns what to do.
@@ -293,7 +295,7 @@ pub fn render_settings(frame: &mut ratatui::Frame, settings: &Settings, themes: 
     }
     theme_spans.push(Span::raw(format!(" {}", theme.name)));
 
-    let items: Vec<ListItem> = vec![
+    let mut items: Vec<ListItem> = vec![
         ListItem::new(Line::from(theme_spans)),
         ListItem::new(Line::from(vec![
             label("Smoothing", 1),
@@ -324,6 +326,17 @@ pub fn render_settings(frame: &mut ratatui::Frame, settings: &Settings, themes: 
             Span::raw(format!("{}%", settings.sensitivity)),
         ])),
     ];
+
+    // EQ bands
+    for (i, &gain) in settings.eq.iter().enumerate() {
+        let idx = 8 + i;
+        let eq_bar = slider_bar(gain, 0.0, 3.0, 20);
+        let band_label = format!("EQ band {}", i + 1);
+        items.push(ListItem::new(Line::from(vec![
+            label(&band_label, idx),
+            Span::raw(format!("{} {:.1}", eq_bar, gain)),
+        ])));
+    }
 
     let list = List::new(items).block(
         Block::default()
@@ -398,6 +411,11 @@ fn adjust_setting(settings: &mut Settings, idx: usize, direction: i32, num_theme
             // Sensitivity: 10–500 in steps of 10
             settings.sensitivity =
                 (settings.sensitivity as i32 + direction * 10).clamp(10, 500) as u32;
+        }
+        i if i >= 8 && i - 8 < settings.eq.len() => {
+            // EQ band: step by 0.1, range 0.0–3.0
+            let band = i - 8;
+            settings.eq[band] = (settings.eq[band] + direction as f32 * 0.1).clamp(0.0, 3.0);
         }
         _ => {}
     }

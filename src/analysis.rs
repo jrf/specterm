@@ -108,6 +108,12 @@ pub fn bin_spectrum(
 
     let mut bars = vec![0.0f32; n];
 
+    // Anti-clumping: track the last used bin index per magnitude source so
+    // adjacent bars that map to the same FFT bin get pushed apart. Without
+    // this, the lowest bass bars all read the same bin and move in lockstep.
+    let mut prev_bass_lo: usize = 0;
+    let mut prev_main_lo: usize = 0;
+
     #[allow(clippy::needless_range_loop)]
     for i in 0..n {
         let freq_lo = (log_min + (log_max - log_min) * i as f32 / n as f32).exp();
@@ -115,21 +121,26 @@ pub fn bin_spectrum(
         let center_freq = (freq_lo + freq_hi) * 0.5;
 
         // Pick the appropriate magnitude source based on center frequency
-        let (magnitudes, freq_per_bin) = if center_freq < BASS_CROSSOVER_HZ
+        let (magnitudes, freq_per_bin, prev_lo) = if center_freq < BASS_CROSSOVER_HZ
             && !bass_magnitudes.is_empty()
         {
-            (bass_magnitudes, bass_freq_per_bin)
+            (bass_magnitudes, bass_freq_per_bin, &mut prev_bass_lo)
         } else if !main_magnitudes.is_empty() {
-            (main_magnitudes, main_freq_per_bin)
+            (main_magnitudes, main_freq_per_bin, &mut prev_main_lo)
         } else {
-            (bass_magnitudes, bass_freq_per_bin)
+            (bass_magnitudes, bass_freq_per_bin, &mut prev_bass_lo)
         };
 
         let f_lo = freq_lo / freq_per_bin;
         let f_hi = freq_hi / freq_per_bin;
 
-        let lo = (f_lo as usize).min(magnitudes.len() - 1);
+        let mut lo = (f_lo as usize).min(magnitudes.len() - 1);
+        // Push past the previous bar's bin to avoid reading the same one
+        if i > 0 && lo <= *prev_lo && *prev_lo + 1 < magnitudes.len() {
+            lo = *prev_lo + 1;
+        }
         let hi = (f_hi as usize).max(lo + 1).min(magnitudes.len());
+        *prev_lo = lo;
 
         let sum: f32 = magnitudes[lo..hi].iter().sum();
         let avg = sum / (hi - lo) as f32;
@@ -144,104 +155,140 @@ pub fn bin_spectrum(
     bars
 }
 
-/// Smooth between consecutive frames to reduce flickering.
-/// Frame-rate independent: `factor` (0.0–0.99) is interpreted as the per-frame
-/// retention at 60fps, then converted to a time constant so behavior is
-/// consistent at any frame rate.
+/// Apply per-band EQ gains to spectrum bars via linear interpolation.
 ///
-/// `dt` is the time since the last frame in seconds.
-pub fn smooth(prev: &[f32], current: &[f32], factor: f32, dt: f32) -> Vec<f32> {
-    if prev.len() != current.len() {
-        return current.to_vec();
+/// `eq_gains` defines N gain multipliers evenly distributed across the bar count.
+/// Each bar's gain is linearly interpolated between the two nearest EQ bands.
+/// Values > 1.0 boost, < 1.0 cut, 1.0 = no change.
+pub fn apply_eq(bars: &mut [f32], eq_gains: &[f32]) {
+    if eq_gains.is_empty() || bars.is_empty() {
+        return;
     }
-    // Convert user-facing factor (assumed at 60fps) to a time constant:
-    //   at 60fps, factor = e^(-dt_ref / τ)  →  τ = -dt_ref / ln(factor)
-    // Then compute the actual per-frame factor: e^(-dt / τ)
-    let alpha = if factor <= 0.0 {
-        0.0
-    } else if factor >= 1.0 {
-        1.0
-    } else {
-        let dt_ref = 1.0 / 60.0;
-        let tau = -dt_ref / factor.ln();
-        (-dt / tau).exp()
-    };
-    prev.iter()
-        .zip(current.iter())
-        .map(|(p, c)| p * alpha + c * (1.0 - alpha))
-        .collect()
+    if eq_gains.len() == 1 {
+        if eq_gains[0] != 1.0 {
+            for bar in bars.iter_mut() {
+                *bar *= eq_gains[0];
+            }
+        }
+        return;
+    }
+
+    let n = bars.len();
+    let bands = eq_gains.len();
+
+    for (i, bar) in bars.iter_mut().enumerate() {
+        // Map bar index to a position in the EQ band array
+        let pos = i as f32 * (bands - 1) as f32 / (n - 1).max(1) as f32;
+        let lo = (pos as usize).min(bands - 2);
+        let frac = pos - lo as f32;
+        let gain = eq_gains[lo] * (1.0 - frac) + eq_gains[lo + 1] * frac;
+        *bar *= gain;
+    }
 }
 
-/// Gravity-based bar fall-off. Bars rise instantly but fall with acceleration,
-/// creating a natural-looking decay. Frame-rate independent via dt scaling.
-pub struct Gravity {
-    heights: Vec<f32>,
-    velocities: Vec<f32>,
-    /// Downward acceleration in units/s² (typical: 3.0–8.0).
-    accel: f32,
+/// Integral smoothing: additive memory accumulation.
+///
+/// Each frame: `out = mem * noise_reduction / integral_mod + current`,
+/// then `mem = out`. `noise_reduction` is 0.0–1.0. Higher = more memory = smoother.
+///
+/// Energy accumulates via the integral, and auto-sensitivity normalizes it
+/// back by adjusting the gain multiplier.
+pub fn smooth(mem: &mut Vec<f32>, bars: &mut [f32], noise_reduction: f32, framerate: f32) {
+    if mem.len() != bars.len() {
+        *mem = bars.to_vec();
+        return;
+    }
+    let integral_mod = (60.0 / framerate).powf(0.1);
+
+    for (i, bar) in bars.iter_mut().enumerate() {
+        *bar += mem[i] * noise_reduction / integral_mod;
+        mem[i] = *bar;
+    }
 }
+
+/// Parabolic bar fall-off. Bars rise instantly to new peaks, then
+/// fall along a parabolic curve: `peak * (1 - fall² * gravity_mod)`.
+///
+/// `fall` increments by a fixed step each frame (scaled for framerate), giving
+/// a smooth deceleration from peak to zero.
+pub struct Gravity {
+    peaks: Vec<f32>,
+    falls: Vec<f32>,
+    prev: Vec<f32>,
+}
+
+/// Per-frame fall increment at 60fps.
+const FALL_STEP_60: f32 = 0.028;
 
 impl Gravity {
-    pub fn new(accel: f32) -> Self {
+    pub fn new() -> Self {
         Self {
-            heights: Vec::new(),
-            velocities: Vec::new(),
-            accel,
+            peaks: Vec::new(),
+            falls: Vec::new(),
+            prev: Vec::new(),
         }
     }
 
-    /// Apply gravity to bars in-place. `dt` is the time since the last frame
-    /// in seconds. Bars that are rising jump to the new value; bars that are
-    /// falling decelerate smoothly.
-    pub fn apply(&mut self, bars: &mut [f32], dt: f32) {
-        // Resize on bar count change
-        if self.heights.len() != bars.len() {
-            self.heights = vec![0.0; bars.len()];
-            self.velocities = vec![0.0; bars.len()];
+    /// Apply parabolic falloff to bars in-place.
+    /// `framerate` is the target FPS (used for framerate-independent scaling).
+    /// `noise_reduction` controls how quickly bars fall (higher = slower).
+    pub fn apply(&mut self, bars: &mut [f32], framerate: f32, noise_reduction: f32) {
+        if self.peaks.len() != bars.len() {
+            self.peaks = vec![0.0; bars.len()];
+            self.falls = vec![0.0; bars.len()];
+            self.prev = vec![0.0; bars.len()];
         }
 
+        let framerate_mod = 60.0 / framerate;
+        let gravity_mod = framerate_mod.powf(2.5) * 2.0 / noise_reduction.max(0.1);
+
         for (i, bar) in bars.iter_mut().enumerate() {
-            if *bar >= self.heights[i] {
-                // Rising: snap to new value, reset velocity
-                self.heights[i] = *bar;
-                self.velocities[i] = 0.0;
-            } else {
-                // Falling: v += a*dt, h -= v*dt (symplectic Euler)
-                self.velocities[i] += self.accel * dt;
-                self.heights[i] -= self.velocities[i] * dt;
-                if self.heights[i] < 0.0 {
-                    self.heights[i] = 0.0;
-                    self.velocities[i] = 0.0;
+            if *bar < self.prev[i] && noise_reduction > 0.1 {
+                // Falling: parabolic decay from peak
+                *bar = self.peaks[i] * (1.0 - self.falls[i] * self.falls[i] * gravity_mod);
+                if *bar < 0.0 {
+                    *bar = 0.0;
                 }
+                self.falls[i] += FALL_STEP_60;
+            } else {
+                // Rising or equal: snap to new peak
+                self.peaks[i] = *bar;
+                self.falls[i] = 0.0;
             }
-            *bar = self.heights[i];
+            self.prev[i] = *bar;
         }
     }
 }
 
-/// Monstercat-style smoothing: each peak spreads influence to its neighbors
-/// with exponential falloff, creating a smooth connected envelope.
+/// Monstercat smoothing: each bar spreads influence to ALL other
+/// bars with exponential distance-based falloff.
 ///
-/// `strength` controls the falloff rate (0.5–0.9 typical, higher = wider spread).
-pub fn monstercat(bars: &mut [f32], strength: f32) {
+/// `monstercat` is the falloff parameter (typical: 1.0–2.0). The divisor
+/// base is `monstercat * 1.5`, so higher values = steeper falloff = less spread.
+/// O(n²) but n is typically < 200 bars so this is fine at audio framerates.
+pub fn monstercat(bars: &mut [f32], monstercat: f32) {
     let n = bars.len();
     if n < 2 {
         return;
     }
+    let base = monstercat * 1.5;
 
-    // Forward pass: each bar pulls up its right neighbor
-    for i in 1..n {
-        let prev = bars[i - 1] * strength;
-        if prev > bars[i] {
-            bars[i] = prev;
+    for z in 0..n {
+        // Spread left
+        for m_y in (0..z).rev() {
+            let de = (z - m_y) as f32;
+            let spread = bars[z] / base.powf(de);
+            if spread > bars[m_y] {
+                bars[m_y] = spread;
+            }
         }
-    }
-
-    // Backward pass: each bar pulls up its left neighbor
-    for i in (0..n - 1).rev() {
-        let next = bars[i + 1] * strength;
-        if next > bars[i] {
-            bars[i] = next;
+        // Spread right
+        for m_y in (z + 1)..n {
+            let de = (m_y - z) as f32;
+            let spread = bars[z] / base.powf(de);
+            if spread > bars[m_y] {
+                bars[m_y] = spread;
+            }
         }
     }
 }
@@ -255,78 +302,57 @@ pub fn noise_gate(bars: &mut [f32], floor: f32) {
     }
 }
 
-/// Automatic sensitivity: asymmetric gain control.
+/// Automatic sensitivity: multiplicative gain adjustment.
 ///
-/// Fast attack (immediate jump when signal exceeds peak) and slow
-/// multiplicative recovery, so quiet sections gradually fill the display
-/// without the jittery "pumping" of a fast exponential decay.
+/// Sensitivity (`sens`) scales all bars. When any bar exceeds 1.0 (overshoot),
+/// sens is reduced by 2% per frame. When no overshoot occurs, sens grows by
+/// 1% per frame (with a 10% boost during initial ramp-up). All rates are
+/// scaled for framerate independence.
 ///
-/// Frame-rate independent: both attack and recovery factors are scaled by dt.
+/// Split into two phases:
+///   1. `scale()` — multiply bars by current sens (before gravity/integral)
+///   2. `adjust()` — clamp overshoots and update sens (after gravity/integral)
 pub struct AutoSensitivity {
-    peak: f32,
-    /// Minimum peak to prevent division by tiny numbers during silence.
-    min_peak: f32,
+    pub sens: f32,
+    sens_init: bool,
 }
-
-/// Per-frame recovery multiplier at 60 fps. The peak shrinks by this factor
-/// each frame when the signal is quieter, so it takes many frames to recover.
-/// At 60 fps: 0.99^60 ≈ 0.55 per second — recovers to half in ~1.1s.
-const SENSITIVITY_RECOVERY_60: f32 = 0.99;
-
-/// Per-frame overshoot multiplier at 60 fps. When a bar overshoots (> 1.0
-/// after normalization), the peak is nudged up by this factor so future
-/// frames clip less. 0.98^60 ≈ 0.30 — fairly aggressive correction.
-const SENSITIVITY_OVERSHOOT_60: f32 = 0.98;
 
 impl AutoSensitivity {
     pub fn new() -> Self {
         Self {
-            peak: 0.001,
-            min_peak: 0.005,
+            sens: 1.0,
+            sens_init: true,
         }
     }
 
-    /// Normalize bars in-place based on tracked peak.
-    /// `dt` is the time since the last frame in seconds.
-    /// Returns the current sensitivity peak for diagnostics.
-    pub fn apply(&mut self, bars: &mut [f32], dt: f32) -> f32 {
-        let current_max = bars.iter().cloned().fold(0.0f32, f32::max);
-
-        // Scale the per-frame factors by dt for frame-rate independence.
-        // factor_at_fps^(fps) = factor_at_fps^(1/dt_ref) should equal
-        // factor^(1/dt), so: factor = factor_at_fps^(dt / dt_ref)
-        let dt_ref = 1.0 / 60.0;
-        let ratio = dt / dt_ref;
-
-        if current_max > self.peak {
-            // Fast attack: jump to current level immediately
-            self.peak = current_max;
-        } else {
-            // Slow multiplicative recovery: peak shrinks gradually
-            self.peak *= SENSITIVITY_RECOVERY_60.powf(ratio);
-            // Don't let peak drop below the current signal
-            if self.peak < current_max {
-                self.peak = current_max;
-            }
-        }
-
-        let peak = self.peak.max(self.min_peak);
-
-        // Normalize and handle overshoot
-        let mut overshot = false;
+    /// Phase 1: scale bars by current sensitivity. Call before gravity/integral.
+    pub fn scale(&self, bars: &mut [f32]) {
         for bar in bars.iter_mut() {
-            *bar /= peak;
+            *bar *= self.sens;
+        }
+    }
+
+    /// Phase 2: clamp overshoots and adjust sens for next frame.
+    /// Call after gravity and integral smoothing.
+    pub fn adjust(&mut self, bars: &mut [f32], framerate: f32, silence: bool) {
+        let autosens_mod = (60.0 / framerate).powf(2.0);
+
+        let mut overshoot = false;
+        for bar in bars.iter_mut() {
             if *bar > 1.0 {
-                overshot = true;
+                overshoot = true;
                 *bar = 1.0;
             }
         }
 
-        // If bars clipped, nudge peak upward so it adapts
-        if overshot {
-            self.peak /= SENSITIVITY_OVERSHOOT_60.powf(ratio);
+        if overshoot {
+            self.sens *= 1.0 - 0.02 * autosens_mod;
+            self.sens_init = false;
+        } else if !silence {
+            self.sens *= 1.0 + 0.01 * autosens_mod;
+            if self.sens_init {
+                self.sens *= 1.0 + 0.1 * autosens_mod;
+            }
         }
-
-        peak
     }
 }
