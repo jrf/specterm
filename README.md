@@ -6,6 +6,11 @@
 
 Terminal audio visualizer for macOS. Renders real-time spectrum bars, waveforms, oscilloscopes, and stereo visualizations from mic input or system audio.
 
+| | |
+|---|---|
+| ![spectrum](spectrum.png) | ![waveform](waveform.png) |
+| ![oscilloscope](oscilloscope.png) | ![stereo](stereo.png) |
+
 ## Install
 
 Requires Rust and (optionally) Swift for system audio capture.
@@ -47,11 +52,6 @@ termwave --list-devices         # list available audio devices
 - **wave** — real-time waveform amplitude plot
 - **scope** — oscilloscope with zero-crossing trigger
 - **stereo** — left channel bars up, right channel bars down from center
-
-| | |
-|---|---|
-| ![spectrum](spectrum.png) | ![waveform](waveform.png) |
-| ![oscilloscope](oscilloscope.png) | ![stereo](stereo.png) |
 
 ## Themes
 
