@@ -2,157 +2,142 @@
 
 use rustfft::{num_complex::Complex, Fft, FftPlanner};
 
-/// Large FFT window for bass frequencies (below ~200 Hz). 4096 at 48 kHz gives
-/// ~11.7 Hz bin spacing — sufficient for resolving bars down to 50 Hz (our default
-/// low_freq). Halved from 8192 to cut bass latency from ~170ms to ~85ms.
+/// FFT size. 4096 at 48 kHz gives ~11.7 Hz bin spacing — sufficient for
+/// resolving bars down to 50 Hz (our default low_freq). ~85ms latency.
 pub const FFT_SIZE: usize = 4096;
 
-/// FFT output size for mids/highs. We take only `FFT_WINDOW_SMALL` real samples
-/// and zero-pad to this size, giving ~42ms time resolution with the frequency
-/// bin spacing of a 4096-point FFT.
-pub const FFT_SIZE_SMALL: usize = 4096;
-
-/// Number of real samples to use for the small FFT before zero-padding.
-const FFT_WINDOW_SMALL: usize = 2048;
-
-/// Frequency below which we use the large FFT for better bass resolution.
-const BASS_CROSSOVER_HZ: f32 = 200.0;
-
-/// Cached FFT plans for reuse across frames. Holds both a large plan (for bass)
-/// and a small plan (for mids/highs) to balance frequency vs time resolution.
+/// Cached FFT plan for reuse across frames.
 pub struct SpectrumAnalyzer {
-    fft_large: std::sync::Arc<dyn Fft<f32>>,
-    fft_small: std::sync::Arc<dyn Fft<f32>>,
+    fft: std::sync::Arc<dyn Fft<f32>>,
 }
 
 impl SpectrumAnalyzer {
     pub fn new() -> Self {
         let mut planner = FftPlanner::new();
-        let fft_large = planner.plan_fft_forward(FFT_SIZE);
-        let fft_small = planner.plan_fft_forward(FFT_SIZE_SMALL);
         Self {
-            fft_large,
-            fft_small,
+            fft: planner.plan_fft_forward(FFT_SIZE),
         }
     }
 
-    /// Run an FFT and return positive-frequency magnitudes.
-    ///
-    /// `window` controls how many real samples are used (the rest is zero-padded
-    /// to `fft_size`). This lets a short analysis window produce the same number
-    /// of frequency bins as a larger FFT.
-    fn run_fft(
-        fft: &dyn Fft<f32>,
-        samples: &[f32],
-        window: usize,
-        fft_size: usize,
-    ) -> Vec<f32> {
+    /// Compute positive-frequency magnitudes (raw, unnormalized).
+    pub fn spectrum(&self, samples: &[f32]) -> Vec<f32> {
         let mut buffer: Vec<Complex<f32>> = samples
             .iter()
-            .take(window)
+            .take(FFT_SIZE)
             .enumerate()
             .map(|(i, &s)| {
                 // Hann window: tapers edges to zero, reducing spectral leakage
-                let w = 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / (window - 1) as f32).cos());
+                let w = 0.5
+                    * (1.0
+                        - (2.0 * std::f32::consts::PI * i as f32 / (FFT_SIZE - 1) as f32)
+                            .cos());
                 Complex { re: s * w, im: 0.0 }
             })
             .collect();
-        buffer.resize(fft_size, Complex { re: 0.0, im: 0.0 });
-        fft.process(&mut buffer);
-        buffer[..fft_size / 2]
+        buffer.resize(FFT_SIZE, Complex { re: 0.0, im: 0.0 });
+        self.fft.process(&mut buffer);
+        buffer[..FFT_SIZE / 2]
             .iter()
-            .map(|c| c.norm() / fft_size as f32)
+            .map(|c| c.norm())
             .collect()
-    }
-
-    /// Compute dual-resolution magnitude spectra: a large FFT for bass and a
-    /// smaller FFT (short window, zero-padded) for mids/highs.
-    /// Returns `(bass_magnitudes, main_magnitudes)`.
-    pub fn spectrum_dual(&self, samples: &[f32]) -> (Vec<f32>, Vec<f32>) {
-        let bass = Self::run_fft(&*self.fft_large, samples, FFT_SIZE, FFT_SIZE);
-        // Use only the most recent FFT_WINDOW_SMALL samples, zero-padded to FFT_SIZE_SMALL
-        let offset = samples.len().saturating_sub(FFT_WINDOW_SMALL);
-        let main = Self::run_fft(&*self.fft_small, &samples[offset..], FFT_WINDOW_SMALL, FFT_SIZE_SMALL);
-        (bass, main)
     }
 }
 
-/// Bin a dual-resolution spectrum into `n` bars using logarithmic frequency scaling.
+/// Pre-computed bin layout for mapping FFT output to spectrum bars.
 ///
-/// `bass_magnitudes` comes from the large FFT (better frequency resolution for bass),
-/// `main_magnitudes` comes from the small FFT (better time resolution for mids/highs).
-/// Bars whose center frequency is below `BASS_CROSSOVER_HZ` use the bass magnitudes;
-/// the rest use the main magnitudes.
-///
-/// `low_freq` and `high_freq` control the visible frequency range.
-pub fn bin_spectrum(
-    bass_magnitudes: &[f32],
-    main_magnitudes: &[f32],
-    n: usize,
-    sample_rate: u32,
-    low_freq: f32,
-    high_freq: f32,
-) -> Vec<f32> {
-    if (bass_magnitudes.is_empty() && main_magnitudes.is_empty()) || n == 0 {
-        return vec![0.0; n];
-    }
+/// Computed once when bar count, sample rate, or frequency range changes.
+/// Each frame, call `apply()` with new magnitudes to produce bars without
+/// recomputing boundaries.
+pub struct BinLayout {
+    /// Per-bar: (bin_lo, bin_hi, eq_gain)
+    ranges: Vec<(usize, usize, f32)>,
+}
 
-    let nyquist = sample_rate as f32 / 2.0;
-    let bass_freq_per_bin = nyquist / bass_magnitudes.len().max(1) as f32;
-    let main_freq_per_bin = nyquist / main_magnitudes.len().max(1) as f32;
-
-    let min_freq = low_freq.max(1.0);
-    let max_freq = high_freq.min(nyquist);
-    let log_min = min_freq.ln();
-    let log_max = max_freq.ln();
-
-    let mut bars = vec![0.0f32; n];
-
-    // Anti-clumping: track the last used bin index per magnitude source so
-    // adjacent bars that map to the same FFT bin get pushed apart. Without
-    // this, the lowest bass bars all read the same bin and move in lockstep.
-    let mut prev_bass_lo: usize = 0;
-    let mut prev_main_lo: usize = 0;
-
-    #[allow(clippy::needless_range_loop)]
-    for i in 0..n {
-        let freq_lo = (log_min + (log_max - log_min) * i as f32 / n as f32).exp();
-        let freq_hi = (log_min + (log_max - log_min) * (i + 1) as f32 / n as f32).exp();
-        let center_freq = (freq_lo + freq_hi) * 0.5;
-
-        // Pick the appropriate magnitude source based on center frequency
-        let (magnitudes, freq_per_bin, prev_lo) = if center_freq < BASS_CROSSOVER_HZ
-            && !bass_magnitudes.is_empty()
-        {
-            (bass_magnitudes, bass_freq_per_bin, &mut prev_bass_lo)
-        } else if !main_magnitudes.is_empty() {
-            (main_magnitudes, main_freq_per_bin, &mut prev_main_lo)
-        } else {
-            (bass_magnitudes, bass_freq_per_bin, &mut prev_bass_lo)
-        };
-
-        let f_lo = freq_lo / freq_per_bin;
-        let f_hi = freq_hi / freq_per_bin;
-
-        let mut lo = (f_lo as usize).min(magnitudes.len() - 1);
-        // Push past the previous bar's bin to avoid reading the same one
-        if i > 0 && lo <= *prev_lo && *prev_lo + 1 < magnitudes.len() {
-            lo = *prev_lo + 1;
+impl BinLayout {
+    /// Compute bin layout for `n` bars over the given frequency range.
+    pub fn new(n: usize, sample_rate: u32, low_freq: f32, high_freq: f32) -> Self {
+        if n == 0 {
+            return Self { ranges: Vec::new() };
         }
-        let hi = (f_hi as usize).max(lo + 1).min(magnitudes.len());
-        *prev_lo = lo;
 
-        let sum: f32 = magnitudes[lo..hi].iter().sum();
-        let avg = sum / (hi - lo) as f32;
+        let num_bins = FFT_SIZE / 2;
+        let nyquist = sample_rate as f32 / 2.0;
+        let freq_per_bin = nyquist / num_bins as f32;
 
-        // Equalizer: boost higher frequencies to compensate for the natural
-        // ~1/f roll-off in FFT magnitudes. Without this, highs look dead
-        // compared to bass even at the same perceived loudness.
-        let eq = (center_freq / min_freq).ln().max(0.0) + 1.0;
-        bars[i] = avg * eq;
+        let min_freq = low_freq.max(1.0);
+        let max_freq = high_freq.min(nyquist);
+        let log_min = min_freq.ln();
+        let log_max = max_freq.ln();
+
+        // --- Pass 1: frequency boundaries with minimum-bandwidth separation ---
+        let mut freqs: Vec<(f32, f32)> = (0..n)
+            .map(|i| {
+                let freq_lo = (log_min + (log_max - log_min) * i as f32 / n as f32).exp();
+                let freq_hi =
+                    (log_min + (log_max - log_min) * (i + 1) as f32 / n as f32).exp();
+                (freq_lo, freq_hi)
+            })
+            .collect();
+
+        for i in 1..n {
+            if freqs[i].0 <= freqs[i - 1].0 {
+                freqs[i].0 = freqs[i - 1].0 + freq_per_bin;
+            }
+        }
+
+        // --- Pass 2: assign non-overlapping FFT bin ranges ---
+        let mut prev_lo: usize = 0;
+        let mut ranges: Vec<(usize, usize, f32)> = Vec::with_capacity(n);
+
+        for (i, &(freq_lo, freq_hi)) in freqs.iter().enumerate() {
+
+            let f_lo = freq_lo / freq_per_bin;
+            let f_hi = freq_hi / freq_per_bin;
+
+            let mut lo = (f_lo as usize).min(num_bins.saturating_sub(1));
+            if i > 0 && lo <= prev_lo && prev_lo + 1 < num_bins {
+                lo = prev_lo + 1;
+                // Adjust previous bar's upper bound to prevent overlap.
+                if let Some(prev) = ranges.last_mut() {
+                    if prev.1 > lo {
+                        prev.1 = lo;
+                    }
+                }
+            }
+            let hi = (f_hi as usize).max(lo + 1).min(num_bins);
+            prev_lo = lo;
+
+            // Equalizer: base scale brings raw f32 magnitudes into a range where
+            // auto-sensitivity can converge quickly. freq^0.85 compensates for
+            // the natural roll-off. log2(fft_size) normalizes for FFT size.
+            const BASE_SCALE: f32 = 1.0 / 8192.0; // 1/2^13 for f32 [-1,1] input
+            let eq = BASE_SCALE * freq_hi.powf(0.85) / (FFT_SIZE as f32).log2();
+
+            ranges.push((lo, hi, eq));
+        }
+
+        Self { ranges }
     }
 
-    bars
+    /// Apply the cached layout to FFT magnitudes, producing spectrum bars.
+    pub fn apply(&self, magnitudes: &[f32]) -> Vec<f32> {
+        let n = self.ranges.len();
+        let mut bars = vec![0.0f32; n];
+
+        for (i, &(lo, hi, eq)) in self.ranges.iter().enumerate() {
+            // Guard against degenerate ranges from aggressive anti-clumping
+            let hi = hi.max(lo + 1).min(magnitudes.len());
+            let lo = lo.min(magnitudes.len().saturating_sub(1));
+            if lo >= hi {
+                continue;
+            }
+            let sum: f32 = magnitudes[lo..hi].iter().sum();
+            let avg = sum / (hi - lo) as f32;
+            bars[i] = avg * eq;
+        }
+
+        bars
+    }
 }
 
 /// Apply per-band EQ gains to spectrum bars via linear interpolation.
@@ -188,8 +173,9 @@ pub fn apply_eq(bars: &mut [f32], eq_gains: &[f32]) {
 
 /// Integral smoothing: additive memory accumulation.
 ///
-/// Each frame: `out = mem * noise_reduction / integral_mod + current`,
-/// then `mem = out`. `noise_reduction` is 0.0–1.0. Higher = more memory = smoother.
+/// Each frame: `out = mem * alpha + current`, then `mem = out`.
+/// `noise_reduction` is 0.0–1.0. Higher = more memory = smoother.
+/// `alpha` is `noise_reduction^(60/fps)` for framerate-independent decay.
 ///
 /// Energy accumulates via the integral, and auto-sensitivity normalizes it
 /// back by adjusting the gain multiplier.
@@ -198,10 +184,10 @@ pub fn smooth(mem: &mut Vec<f32>, bars: &mut [f32], noise_reduction: f32, framer
         *mem = bars.to_vec();
         return;
     }
-    let integral_mod = (60.0 / framerate).powf(0.1);
+    let alpha = noise_reduction.powf(60.0 / framerate);
 
     for (i, bar) in bars.iter_mut().enumerate() {
-        *bar += mem[i] * noise_reduction / integral_mod;
+        *bar += mem[i] * alpha;
         mem[i] = *bar;
     }
 }
@@ -209,8 +195,8 @@ pub fn smooth(mem: &mut Vec<f32>, bars: &mut [f32], noise_reduction: f32, framer
 /// Parabolic bar fall-off. Bars rise instantly to new peaks, then
 /// fall along a parabolic curve: `peak * (1 - fall² * gravity_mod)`.
 ///
-/// `fall` increments by a fixed step each frame (scaled for framerate), giving
-/// a smooth deceleration from peak to zero.
+/// `fall` increments proportionally to elapsed time each frame, so the
+/// decay takes the same wall-clock time regardless of framerate.
 pub struct Gravity {
     peaks: Vec<f32>,
     falls: Vec<f32>,
@@ -239,8 +225,12 @@ impl Gravity {
             self.prev = vec![0.0; bars.len()];
         }
 
-        let framerate_mod = 60.0 / framerate;
-        let gravity_mod = framerate_mod.powf(2.5) * 2.0 / noise_reduction.max(0.1);
+        // Scale fall step so that fall accumulates at the same rate per second
+        // regardless of FPS: at 60fps, step = FALL_STEP_60; at 30fps, step = 2×.
+        let fall_step = FALL_STEP_60 * 60.0 / framerate;
+        // gravity_mod no longer needs framerate compensation since fall itself
+        // is now time-proportional.
+        let gravity_mod = 2.0 / noise_reduction.max(0.1);
 
         for (i, bar) in bars.iter_mut().enumerate() {
             if *bar < self.prev[i] && noise_reduction > 0.1 {
@@ -249,7 +239,7 @@ impl Gravity {
                 if *bar < 0.0 {
                     *bar = 0.0;
                 }
-                self.falls[i] += FALL_STEP_60;
+                self.falls[i] += fall_step;
             } else {
                 // Rising or equal: snap to new peak
                 self.peaks[i] = *bar;
@@ -334,8 +324,11 @@ impl AutoSensitivity {
 
     /// Phase 2: clamp overshoots and adjust sens for next frame.
     /// Call after gravity and integral smoothing.
+    ///
+    /// Per-frame factors use `base^(60/fps)` so the per-second rate is
+    /// constant regardless of framerate.
     pub fn adjust(&mut self, bars: &mut [f32], framerate: f32, silence: bool) {
-        let autosens_mod = (60.0 / framerate).powf(2.0);
+        let time_scale = 60.0 / framerate;
 
         let mut overshoot = false;
         for bar in bars.iter_mut() {
@@ -346,12 +339,12 @@ impl AutoSensitivity {
         }
 
         if overshoot {
-            self.sens *= 1.0 - 0.02 * autosens_mod;
+            self.sens *= 0.98_f32.powf(time_scale);
             self.sens_init = false;
         } else if !silence {
-            self.sens *= 1.0 + 0.01 * autosens_mod;
+            self.sens *= 1.01_f32.powf(time_scale);
             if self.sens_init {
-                self.sens *= 1.0 + 0.1 * autosens_mod;
+                self.sens *= 1.1_f32.powf(time_scale);
             }
         }
     }

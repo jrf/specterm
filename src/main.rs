@@ -152,6 +152,11 @@ struct VisualizerState {
     gravity_l: analysis::Gravity,
     gravity_r: analysis::Gravity,
     analyzer: analysis::SpectrumAnalyzer,
+    /// Cached bin layout — rebuilt only when bar count, sample rate, or freq range changes.
+    bin_layout: Option<analysis::BinLayout>,
+    layout_sample_rate: u32,
+    layout_low_freq: f32,
+    layout_high_freq: f32,
 }
 
 impl VisualizerState {
@@ -168,6 +173,10 @@ impl VisualizerState {
             gravity_l: analysis::Gravity::new(),
             gravity_r: analysis::Gravity::new(),
             analyzer: analysis::SpectrumAnalyzer::new(),
+            bin_layout: None,
+            layout_sample_rate: 0,
+            layout_low_freq: 0.0,
+            layout_high_freq: 0.0,
         }
     }
 
@@ -189,7 +198,27 @@ impl VisualizerState {
     fn resize_bars(&mut self, new_count: usize) {
         if new_count != self.num_bars {
             self.num_bars = new_count;
+            self.bin_layout = None; // invalidate cached layout
             self.reset_bars();
+        }
+    }
+
+    /// Ensure the cached bin layout is up to date for the given parameters.
+    fn ensure_bin_layout(&mut self, sample_rate: u32, low_freq: f32, high_freq: f32) {
+        if self.bin_layout.is_none()
+            || self.layout_sample_rate != sample_rate
+            || self.layout_low_freq != low_freq
+            || self.layout_high_freq != high_freq
+        {
+            self.bin_layout = Some(analysis::BinLayout::new(
+                self.num_bars,
+                sample_rate,
+                low_freq,
+                high_freq,
+            ));
+            self.layout_sample_rate = sample_rate;
+            self.layout_low_freq = low_freq;
+            self.layout_high_freq = high_freq;
         }
     }
 
@@ -243,15 +272,9 @@ impl VisualizerState {
         framerate: f32,
         eq_gains: &[f32],
     ) -> Vec<f32> {
-        let (bass_mag, main_mag) = self.analyzer.spectrum_dual(samples);
-        let mut bars = analysis::bin_spectrum(
-            &bass_mag,
-            &main_mag,
-            self.num_bars,
-            sample_rate,
-            low_freq,
-            high_freq,
-        );
+        self.ensure_bin_layout(sample_rate, low_freq, high_freq);
+        let magnitudes = self.analyzer.spectrum(samples);
+        let mut bars = self.bin_layout.as_ref().unwrap().apply(&magnitudes);
         analysis::apply_eq(&mut bars, eq_gains);
         Self::process_channel(
             &mut self.prev_bars,
@@ -276,24 +299,12 @@ impl VisualizerState {
         framerate: f32,
         eq_gains: &[f32],
     ) -> (Vec<f32>, Vec<f32>) {
-        let (left_bass, left_main) = self.analyzer.spectrum_dual(left_samples);
-        let (right_bass, right_main) = self.analyzer.spectrum_dual(right_samples);
-        let mut left_bars = analysis::bin_spectrum(
-            &left_bass,
-            &left_main,
-            self.num_bars,
-            sample_rate,
-            low_freq,
-            high_freq,
-        );
-        let mut right_bars = analysis::bin_spectrum(
-            &right_bass,
-            &right_main,
-            self.num_bars,
-            sample_rate,
-            low_freq,
-            high_freq,
-        );
+        self.ensure_bin_layout(sample_rate, low_freq, high_freq);
+        let left_mag = self.analyzer.spectrum(left_samples);
+        let right_mag = self.analyzer.spectrum(right_samples);
+        let layout = self.bin_layout.as_ref().unwrap();
+        let mut left_bars = layout.apply(&left_mag);
+        let mut right_bars = layout.apply(&right_mag);
         analysis::apply_eq(&mut left_bars, eq_gains);
         analysis::apply_eq(&mut right_bars, eq_gains);
 
