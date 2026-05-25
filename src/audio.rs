@@ -1,4 +1,4 @@
-//! Audio capture from system input devices via cpal, or from termwave-tap subprocess.
+//! Audio capture from system input devices via cpal, or from specterm-tap subprocess.
 
 use std::io::Read as _;
 use std::process::{Child, Command, Stdio};
@@ -162,10 +162,7 @@ pub fn start_capture(
             device.build_input_stream(
                 &config.into(),
                 move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                    let floats: Vec<f32> = data
-                        .iter()
-                        .map(|&s| s as f32 / 32768.0)
-                        .collect();
+                    let floats: Vec<f32> = data.iter().map(|&s| s as f32 / 32768.0).collect();
                     write_samples(&mb, &st, &floats, channels, &lw);
                 },
                 err_fn,
@@ -196,7 +193,7 @@ pub fn start_capture(
     Ok((sample_rate, CaptureHandle::Device(stream)))
 }
 
-/// Start capturing system audio via termwave-tap subprocess.
+/// Start capturing system audio via specterm-tap subprocess.
 pub fn start_tap(
     mono_buf: SampleBuffer,
     stereo: StereoPair,
@@ -213,7 +210,7 @@ pub fn start_tap(
         .stderr(Stdio::null())
         .spawn()
         .context(format!(
-            "failed to start termwave-tap (looked for '{}'). \
+            "failed to start specterm-tap (looked for '{}'). \
              Build it with: cd tap && swift build -c release",
             tap_bin
         ))?;
@@ -268,17 +265,17 @@ fn clear_buffers(mono: &SampleBuffer, stereo: &StereoPair) {
     stereo.1.lock().unwrap().fill(0.0);
 }
 
-/// Find the termwave-tap binary: check next to our own executable first, then PATH.
+/// Find the specterm-tap binary: check next to our own executable first, then PATH.
 fn find_tap_binary() -> String {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let candidate = dir.join("termwave-tap");
+            let candidate = dir.join("specterm-tap");
             if candidate.exists() {
                 return candidate.to_string_lossy().into_owned();
             }
         }
     }
-    "termwave-tap".to_string()
+    "specterm-tap".to_string()
 }
 
 /// Write samples into a single ring buffer and update the write timestamp.
@@ -394,5 +391,9 @@ fn query_now_playing() -> Option<String> {
         return None;
     }
     let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if text.is_empty() { None } else { Some(text) }
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }

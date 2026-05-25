@@ -9,8 +9,8 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Padding},
     widgets::canvas::{Canvas, Line as CanvasLine},
+    widgets::{Block, Borders, List, ListItem, Padding},
     Terminal,
 };
 use std::time::Duration;
@@ -67,8 +67,7 @@ pub fn poll_input(timeout: Duration) -> Result<Action> {
                 return Ok(Action::None);
             }
             if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
-                || (key.code == KeyCode::Char('c')
-                    && key.modifiers.contains(KeyModifiers::CONTROL))
+                || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
             {
                 return Ok(Action::Quit);
             }
@@ -99,7 +98,11 @@ pub enum DeviceMenuResult {
 }
 
 /// Show an interactive device selection menu.
-pub fn device_menu(terminal: &mut Term, devices: &[String], theme: &Theme) -> Result<DeviceMenuResult> {
+pub fn device_menu(
+    terminal: &mut Term,
+    devices: &[String],
+    theme: &Theme,
+) -> Result<DeviceMenuResult> {
     let mut selected: usize = 0;
     let total = devices.len() + 1;
 
@@ -108,30 +111,38 @@ pub fn device_menu(terminal: &mut Term, devices: &[String], theme: &Theme) -> Re
             let area = frame.area();
 
             let accent = theme.wave_color;
-            let items: Vec<ListItem> = std::iter::once(ListItem::new(Line::from(vec![
-                Span::styled("  Default device", Style::default().fg(accent)),
-            ])))
-            .chain(devices.iter().map(|name| {
-                ListItem::new(Line::from(vec![Span::styled(format!("  {}", name), Style::default().fg(accent))]))
-            }))
-            .enumerate()
-            .map(|(i, item)| {
-                if i == selected {
-                    item.style(
-                        Style::default()
-                            .fg(accent)
-                            .add_modifier(Modifier::BOLD | Modifier::REVERSED),
-                    )
-                } else {
-                    item
-                }
-            })
-            .collect();
+            let items: Vec<ListItem> =
+                std::iter::once(ListItem::new(Line::from(vec![Span::styled(
+                    "  Default device",
+                    Style::default().fg(accent),
+                )])))
+                .chain(devices.iter().map(|name| {
+                    ListItem::new(Line::from(vec![Span::styled(
+                        format!("  {}", name),
+                        Style::default().fg(accent),
+                    )]))
+                }))
+                .enumerate()
+                .map(|(i, item)| {
+                    if i == selected {
+                        item.style(
+                            Style::default()
+                                .fg(accent)
+                                .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+                        )
+                    } else {
+                        item
+                    }
+                })
+                .collect();
 
             let border_color = theme.gradient[theme.gradient.len() / 2];
             let list = List::new(items).block(
                 Block::default()
-                    .title(Span::styled(" termwave — select audio device ", Style::default().fg(border_color)))
+                    .title(Span::styled(
+                        " specterm — select audio device ",
+                        Style::default().fg(border_color),
+                    ))
                     .title_bottom(Span::styled(
                         " ↑/↓ navigate  Enter select  Esc back  q quit ",
                         Style::default().fg(border_color),
@@ -220,11 +231,19 @@ pub enum SettingsAction {
 
 impl SettingsState {
     pub fn new(num_eq_bands: usize) -> Self {
-        Self { selected: 0, num_items: 8 + num_eq_bands }
+        Self {
+            selected: 0,
+            num_items: 8 + num_eq_bands,
+        }
     }
 
     /// Handle a key event. Mutates settings in place, returns what to do.
-    pub fn handle_key(&mut self, key: KeyCode, settings: &mut Settings, num_themes: usize) -> SettingsAction {
+    pub fn handle_key(
+        &mut self,
+        key: KeyCode,
+        settings: &mut Settings,
+        num_themes: usize,
+    ) -> SettingsAction {
         match key {
             KeyCode::Up | KeyCode::Char('k') => {
                 self.selected = self.selected.saturating_sub(1);
@@ -262,17 +281,17 @@ impl SettingsState {
 }
 
 /// Render settings overlay (centered, 50% of terminal) on top of the current frame.
-pub fn render_settings(frame: &mut ratatui::Frame, settings: &Settings, themes: &[Theme], state: &SettingsState) {
+pub fn render_settings(
+    frame: &mut ratatui::Frame,
+    settings: &Settings,
+    themes: &[Theme],
+    state: &SettingsState,
+) {
     let full = frame.area();
     // Use 80% of terminal width (min 40 cols) so the overlay fits in narrow terminals
     let w = (full.width * 4 / 5).max(40).min(full.width);
     let h = full.height / 2;
-    let area = Rect::new(
-        full.width.saturating_sub(w) / 2,
-        full.height / 4,
-        w,
-        h,
-    );
+    let area = Rect::new(full.width.saturating_sub(w) / 2, full.height / 4, w, h);
 
     frame.render_widget(ratatui::widgets::Clear, area);
 
@@ -317,7 +336,11 @@ pub fn render_settings(frame: &mut ratatui::Frame, settings: &Settings, themes: 
         ])),
         ListItem::new(Line::from(vec![
             label("Gradient", 4),
-            Span::raw(if settings.gradient_by_position { "[position]" } else { "[amplitude]" }),
+            Span::raw(if settings.gradient_by_position {
+                "[position]"
+            } else {
+                "[amplitude]"
+            }),
         ])),
         ListItem::new(Line::from(vec![
             label("Bar width", 5),
@@ -346,7 +369,10 @@ pub fn render_settings(frame: &mut ratatui::Frame, settings: &Settings, themes: 
 
     let list = List::new(items).block(
         Block::default()
-            .title(Span::styled(" termwave — settings ", Style::default().fg(border_color)))
+            .title(Span::styled(
+                " specterm — settings ",
+                Style::default().fg(border_color),
+            ))
             .title_bottom(Span::styled(
                 " ↑/↓ navigate  ←/→ adjust  Enter/Space toggle  Esc back ",
                 Style::default().fg(border_color),
@@ -405,13 +431,11 @@ fn adjust_setting(settings: &mut Settings, idx: usize, direction: i32, num_theme
         }
         5 => {
             // Bar width: 1–8
-            settings.bar_width =
-                (settings.bar_width as i32 + direction).clamp(1, 8) as usize;
+            settings.bar_width = (settings.bar_width as i32 + direction).clamp(1, 8) as usize;
         }
         6 => {
             // Bar spacing: 0–4
-            settings.bar_spacing =
-                (settings.bar_spacing as i32 + direction).clamp(0, 4) as usize;
+            settings.bar_spacing = (settings.bar_spacing as i32 + direction).clamp(0, 4) as usize;
         }
         7 => {
             // Sensitivity: 10–500 in steps of 10
@@ -455,10 +479,16 @@ pub fn help(terminal: &mut Term, theme: &Theme) -> Result<()> {
         ("--mode scope", "Oscilloscope (triggered waveform)"),
         ("--fps N", "Set target framerate (default: 60)"),
         ("--low-freq N", "Low frequency cutoff in Hz (default: 20)"),
-        ("--high-freq N", "High frequency cutoff in Hz (default: 20000)"),
+        (
+            "--high-freq N",
+            "High frequency cutoff in Hz (default: 20000)",
+        ),
         ("--noise-floor N", "Noise gate threshold (default: 0.0)"),
         ("--bar-width N", "Bar width in columns, 1–8 (default: 2)"),
-        ("--bar-spacing N", "Bar spacing in columns, 0–4 (default: 1)"),
+        (
+            "--bar-spacing N",
+            "Bar spacing in columns, 0–4 (default: 1)",
+        ),
     ];
 
     let accent = theme.wave_color;
@@ -496,7 +526,10 @@ pub fn help(terminal: &mut Term, theme: &Theme) -> Result<()> {
 
         let paragraph = ratatui::widgets::Paragraph::new(lines).block(
             Block::default()
-                .title(Span::styled(" termwave — help ", Style::default().fg(border_color)))
+                .title(Span::styled(
+                    " specterm — help ",
+                    Style::default().fg(border_color),
+                ))
                 .title_bottom(Span::styled(
                     " press any key to close ",
                     Style::default().fg(border_color),
@@ -532,25 +565,33 @@ pub struct RenderContext<'a> {
 
 /// Draw spectrum bars using Unicode block elements (▁▂▃▄▅▆▇█) for 1/8th-cell
 /// vertical resolution.
-pub fn render_spectrum(
-    frame: &mut ratatui::Frame,
-    bars: &[f32],
-    ctx: &RenderContext,
-) {
+pub fn render_spectrum(frame: &mut ratatui::Frame, bars: &[f32], ctx: &RenderContext) {
     let theme = ctx.theme;
     let theme_name = &theme.name;
     let num_bars = bars.len();
-    let fps_str = ctx.actual_fps.map(|f| format!(" {}fps", f)).unwrap_or_default();
+    let fps_str = ctx
+        .actual_fps
+        .map(|f| format!(" {}fps", f))
+        .unwrap_or_default();
     let sens_str = format!(" {}% sensitivity", ctx.sensitivity);
-    let title = format!(" termwave — spectrum [{}] ({} bars{}){} ", theme_name, num_bars, sens_str, fps_str);
+    let title = format!(
+        " specterm — spectrum [{}] ({} bars{}){} ",
+        theme_name, num_bars, sens_str, fps_str
+    );
     let bottom = format!(" {} | ? help ", ctx.device);
 
     {
         let area = frame.area();
         let border_color = theme.gradient[theme.gradient.len() / 2];
         let border = Block::default()
-            .title(Span::styled(title.as_str(), Style::default().fg(border_color)))
-            .title_bottom(Span::styled(bottom.as_str(), Style::default().fg(border_color)))
+            .title(Span::styled(
+                title.as_str(),
+                Style::default().fg(border_color),
+            ))
+            .title_bottom(Span::styled(
+                bottom.as_str(),
+                Style::default().fg(border_color),
+            ))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_color));
         let inner = border.inner(area);
@@ -560,7 +601,11 @@ pub fn render_spectrum(
         let bar_w = ctx.bar_width;
         let stride = bar_w + ctx.bar_spacing;
         // Center bars within the available width
-        let total_w = if num_bars > 0 { num_bars * bar_w + (num_bars - 1) * ctx.bar_spacing } else { 0 };
+        let total_w = if num_bars > 0 {
+            num_bars * bar_w + (num_bars - 1) * ctx.bar_spacing
+        } else {
+            0
+        };
         let x_offset = inner.x + ((inner.width as usize).saturating_sub(total_w) / 2) as u16;
 
         let height = inner.height as f32;
@@ -603,8 +648,10 @@ pub fn render_spectrum(
                         // ▀ fills top half with fg, bottom half with bg
                         let sub_bottom = row_idx * 2;
                         let sub_top = sub_bottom + 1;
-                        let color_bottom = theme.bar_color(sub_bottom as f32 / (total_sub - 1).max(1) as f32);
-                        let color_top = theme.bar_color(sub_top as f32 / (total_sub - 1).max(1) as f32);
+                        let color_bottom =
+                            theme.bar_color(sub_bottom as f32 / (total_sub - 1).max(1) as f32);
+                        let color_top =
+                            theme.bar_color(sub_top as f32 / (total_sub - 1).max(1) as f32);
                         for x in x_start..x_end {
                             let cell = &mut buf[(x, y)];
                             cell.set_char('▀');
@@ -613,9 +660,8 @@ pub fn render_spectrum(
                         }
                     }
                 } else if row_idx == full_cells && remainder > 0 {
-                    let color = h_color.unwrap_or_else(|| {
-                        theme.bar_color(row as f32 / (height - 1.0).max(1.0))
-                    });
+                    let color = h_color
+                        .unwrap_or_else(|| theme.bar_color(row as f32 / (height - 1.0).max(1.0)));
                     for x in x_start..x_end {
                         let cell = &mut buf[(x, y)];
                         cell.set_char(BLOCK_CHARS[remainder]);
@@ -628,17 +674,29 @@ pub fn render_spectrum(
 }
 
 /// Draw waveform.
-pub fn render_wave(frame: &mut ratatui::Frame, samples: &[f32], theme: &Theme, device: &str, actual_fps: Option<u32>) {
+pub fn render_wave(
+    frame: &mut ratatui::Frame,
+    samples: &[f32],
+    theme: &Theme,
+    device: &str,
+    actual_fps: Option<u32>,
+) {
     let color = theme.wave_color;
     let border_color = theme.gradient[theme.gradient.len() / 2];
     let fps_str = actual_fps.map(|f| format!(" {}fps", f)).unwrap_or_default();
-    let title = format!(" termwave — waveform{} ", fps_str);
+    let title = format!(" specterm — waveform{} ", fps_str);
     let bottom = format!(" {} | ? help ", device);
     render_wave_inner(frame, samples, &title, &bottom, color, border_color);
 }
 
 /// Draw oscilloscope (zero-crossing triggered waveform).
-pub fn render_scope(frame: &mut ratatui::Frame, samples: &[f32], theme: &Theme, device: &str, actual_fps: Option<u32>) {
+pub fn render_scope(
+    frame: &mut ratatui::Frame,
+    samples: &[f32],
+    theme: &Theme,
+    device: &str,
+    actual_fps: Option<u32>,
+) {
     let trigger_offset = samples
         .windows(2)
         .position(|w| w[0] <= 0.0 && w[1] > 0.0)
@@ -647,21 +705,42 @@ pub fn render_scope(frame: &mut ratatui::Frame, samples: &[f32], theme: &Theme, 
     let triggered = &samples[trigger_offset..];
     let border_color = theme.gradient[theme.gradient.len() / 2];
     let fps_str = actual_fps.map(|f| format!(" {}fps", f)).unwrap_or_default();
-    let title = format!(" termwave — oscilloscope{} ", fps_str);
+    let title = format!(" specterm — oscilloscope{} ", fps_str);
     let bottom = format!(" {} | ? help ", device);
-    render_wave_inner(frame, triggered, &title, &bottom, theme.scope_color, border_color);
+    render_wave_inner(
+        frame,
+        triggered,
+        &title,
+        &bottom,
+        theme.scope_color,
+        border_color,
+    );
 }
 
-fn render_wave_inner(frame: &mut ratatui::Frame, samples: &[f32], title: &str, bottom: &str, color: Color, border_color: Color) {
+fn render_wave_inner(
+    frame: &mut ratatui::Frame,
+    samples: &[f32],
+    title: &str,
+    bottom: &str,
+    color: Color,
+    border_color: Color,
+) {
     let area = frame.area();
-    let inner = Rect::new(area.x + 1, area.y + 1, area.width.saturating_sub(2), area.height.saturating_sub(2));
+    let inner = Rect::new(
+        area.x + 1,
+        area.y + 1,
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
+    );
 
     let canvas = Canvas::default()
-        .block(Block::default()
-            .title(Span::styled(title, Style::default().fg(border_color)))
-            .title_bottom(Span::styled(bottom, Style::default().fg(border_color)))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(border_color)))
+        .block(
+            Block::default()
+                .title(Span::styled(title, Style::default().fg(border_color)))
+                .title_bottom(Span::styled(bottom, Style::default().fg(border_color)))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(border_color)),
+        )
         .x_bounds([0.0, inner.width as f64])
         .y_bounds([-1.0, 1.0])
         .paint(|ctx| {
@@ -698,17 +777,29 @@ pub fn render_stereo(
     let theme = ctx.theme;
     let theme_name = &theme.name;
     let num_bars = left_bars.len();
-    let fps_str = ctx.actual_fps.map(|f| format!(" {}fps", f)).unwrap_or_default();
+    let fps_str = ctx
+        .actual_fps
+        .map(|f| format!(" {}fps", f))
+        .unwrap_or_default();
     let sens_str = format!(" {}% sensitivity", ctx.sensitivity);
-    let title = format!(" termwave — stereo [{}] ({} bars{}){} ", theme_name, num_bars, sens_str, fps_str);
+    let title = format!(
+        " specterm — stereo [{}] ({} bars{}){} ",
+        theme_name, num_bars, sens_str, fps_str
+    );
     let bottom = format!(" {} | ? help ", ctx.device);
 
     {
         let area = frame.area();
         let border_color = theme.gradient[theme.gradient.len() / 2];
         let border = Block::default()
-            .title(Span::styled(title.as_str(), Style::default().fg(border_color)))
-            .title_bottom(Span::styled(bottom.as_str(), Style::default().fg(border_color)))
+            .title(Span::styled(
+                title.as_str(),
+                Style::default().fg(border_color),
+            ))
+            .title_bottom(Span::styled(
+                bottom.as_str(),
+                Style::default().fg(border_color),
+            ))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_color));
         let inner = border.inner(area);
@@ -717,7 +808,11 @@ pub fn render_stereo(
         let buf = frame.buffer_mut();
         let bar_w = ctx.bar_width;
         let stride = bar_w + ctx.bar_spacing;
-        let total_w = if num_bars > 0 { num_bars * bar_w + (num_bars - 1) * ctx.bar_spacing } else { 0 };
+        let total_w = if num_bars > 0 {
+            num_bars * bar_w + (num_bars - 1) * ctx.bar_spacing
+        } else {
+            0
+        };
         let x_offset = inner.x + ((inner.width as usize).saturating_sub(total_w) / 2) as u16;
 
         // Split inner area into upper half (left channel) and lower half (right channel)
@@ -765,8 +860,10 @@ pub fn render_stereo(
                     } else {
                         let sub_bottom = row_idx * 2;
                         let sub_top = sub_bottom + 1;
-                        let color_bottom = theme.bar_color(sub_bottom as f32 / (left_total_sub - 1).max(1) as f32);
-                        let color_top = theme.bar_color(sub_top as f32 / (left_total_sub - 1).max(1) as f32);
+                        let color_bottom =
+                            theme.bar_color(sub_bottom as f32 / (left_total_sub - 1).max(1) as f32);
+                        let color_top =
+                            theme.bar_color(sub_top as f32 / (left_total_sub - 1).max(1) as f32);
                         for x in x_start..x_end {
                             let cell = &mut buf[(x, y)];
                             cell.set_char('▀');
@@ -775,9 +872,8 @@ pub fn render_stereo(
                         }
                     }
                 } else if row_idx == full_cells && remainder > 0 {
-                    let color = h_color.unwrap_or_else(|| {
-                        theme.bar_color(row as f32 / (half_h_f - 1.0).max(1.0))
-                    });
+                    let color = h_color
+                        .unwrap_or_else(|| theme.bar_color(row as f32 / (half_h_f - 1.0).max(1.0)));
                     for x in x_start..x_end {
                         let cell = &mut buf[(x, y)];
                         cell.set_char(BLOCK_CHARS[remainder]);
@@ -827,8 +923,10 @@ pub fn render_stereo(
                         // ▀ top half = closer to center, bottom half = farther
                         let sub_top = row_idx * 2;
                         let sub_bottom = sub_top + 1;
-                        let color_top = theme.bar_color(sub_top as f32 / (right_total_sub - 1).max(1) as f32);
-                        let color_bottom = theme.bar_color(sub_bottom as f32 / (right_total_sub - 1).max(1) as f32);
+                        let color_top =
+                            theme.bar_color(sub_top as f32 / (right_total_sub - 1).max(1) as f32);
+                        let color_bottom = theme
+                            .bar_color(sub_bottom as f32 / (right_total_sub - 1).max(1) as f32);
                         for x in x_start..x_end {
                             let cell = &mut buf[(x, y)];
                             cell.set_char('▀');

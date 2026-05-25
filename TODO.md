@@ -1,4 +1,4 @@
-# termwave — TODO
+# specterm — TODO
 
 ## Now
 
@@ -19,7 +19,7 @@
 - [x] Core audio capture and spectrum rendering with FFT pipeline #feature
 - [x] Dual-resolution FFT and logarithmic frequency binning #improvement
 - [x] Waveform, oscilloscope, and stereo visualizer modes #feature
-- [x] ScreenCaptureKit system audio capture (`termwave-tap`) #feature
+- [x] ScreenCaptureKit system audio capture (`specterm-tap`) #feature
 - [x] Runtime device switching and enumeration #feature
 - [x] TOML-based theme system with 8 built-in themes #feature
 - [x] Non-blocking settings overlay with live preview #feature

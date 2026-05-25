@@ -1,6 +1,6 @@
 //! Color themes for the visualizer.
 //!
-//! Themes are loaded from TOML files in `~/.config/termwave/themes/`. Each file
+//! Themes are loaded from TOML files in `~/.config/specterm/themes/`. Each file
 //! defines a `[colors]` table of named hex colors and a `[visualizer]` table
 //! that references those names for the gradient, wave, and scope colors.
 
@@ -264,12 +264,12 @@ fn parse_theme(name: &str, content: &str) -> Option<Theme> {
     })
 }
 
-/// Get the themes directory path (~/.config/termwave/themes/).
+/// Get the themes directory path (~/.config/specterm/themes/).
 fn themes_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home)
         .join(".config")
-        .join("termwave")
+        .join("specterm")
         .join("themes")
 }
 

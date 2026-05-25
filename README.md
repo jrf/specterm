@@ -1,4 +1,4 @@
-# termwave
+# specterm
 
 [![Rust](https://img.shields.io/badge/rust-stable-orange?logo=rust)](https://www.rust-lang.org/)
 [![Swift](https://img.shields.io/badge/swift-6.2+-F05138?logo=swift&logoColor=white)](https://swift.org/)
@@ -19,19 +19,19 @@ Requires Rust and (optionally) Swift for system audio capture.
 just
 ```
 
-This builds and installs `termwave` and `termwave-tap` to `~/.cargo/bin`.
+This builds and installs `specterm` and `specterm-tap` to `~/.cargo/bin`.
 
 ## Usage
 
 ```
-termwave                        # spectrum visualizer (system audio by default)
-termwave --mode wave            # waveform mode
-termwave --mode scope           # oscilloscope mode
-termwave --mode stereo          # stereo L/R visualization
-termwave --device "system"      # capture system audio (requires termwave-tap)
-termwave --theme fire           # use the fire color theme
-termwave --bars 128             # set number of spectrum bars
-termwave --list-devices         # list available audio devices
+specterm                        # spectrum visualizer (system audio by default)
+specterm --mode wave            # waveform mode
+specterm --mode scope           # oscilloscope mode
+specterm --mode stereo          # stereo L/R visualization
+specterm --device "system"      # capture system audio (requires specterm-tap)
+specterm --theme fire           # use the fire color theme
+specterm --bars 128             # set number of spectrum bars
+specterm --list-devices         # list available audio devices
 ```
 
 ## Keybindings
@@ -78,11 +78,11 @@ Press `s` to open the settings overlay (visualizer keeps running behind it). Adj
 - **Bar spacing** — gap between bars (0–4)
 - **Sensitivity** — manual gain adjustment (10–500%)
 
-All settings persist to `~/.config/termwave/config.toml`.
+All settings persist to `~/.config/specterm/config.toml`.
 
 ## System audio capture
 
-To visualize audio from Apple Music or other apps, termwave uses a companion Swift binary (`termwave-tap`) that captures system audio via ScreenCaptureKit.
+To visualize audio from Apple Music or other apps, specterm uses a companion Swift binary (`specterm-tap`) that captures system audio via ScreenCaptureKit.
 
 **Requirements:**
 - macOS 13+

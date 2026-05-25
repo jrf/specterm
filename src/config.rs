@@ -1,4 +1,4 @@
-//! Configuration file support. Loads/saves from ~/.config/termwave/config.toml.
+//! Configuration file support. Loads/saves from ~/.config/specterm/config.toml.
 
 use std::fs;
 use std::path::PathBuf;
@@ -48,14 +48,14 @@ impl Default for Config {
     }
 }
 
-/// Get the config file path (~/.config/termwave/config.toml).
+/// Get the config file path (~/.config/specterm/config.toml).
 pub fn config_path() -> PathBuf {
     dirs().join("config.toml")
 }
 
 fn dirs() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".config").join("termwave")
+    PathBuf::from(home).join(".config").join("specterm")
 }
 
 /// Load config from disk, falling back to defaults for missing fields.

@@ -28,18 +28,13 @@ impl SpectrumAnalyzer {
             .map(|(i, &s)| {
                 // Hann window: tapers edges to zero, reducing spectral leakage
                 let w = 0.5
-                    * (1.0
-                        - (2.0 * std::f32::consts::PI * i as f32 / (FFT_SIZE - 1) as f32)
-                            .cos());
+                    * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / (FFT_SIZE - 1) as f32).cos());
                 Complex { re: s * w, im: 0.0 }
             })
             .collect();
         buffer.resize(FFT_SIZE, Complex { re: 0.0, im: 0.0 });
         self.fft.process(&mut buffer);
-        buffer[..FFT_SIZE / 2]
-            .iter()
-            .map(|c| c.norm())
-            .collect()
+        buffer[..FFT_SIZE / 2].iter().map(|c| c.norm()).collect()
     }
 }
 
@@ -73,8 +68,7 @@ impl BinLayout {
         let mut freqs: Vec<(f32, f32)> = (0..n)
             .map(|i| {
                 let freq_lo = (log_min + (log_max - log_min) * i as f32 / n as f32).exp();
-                let freq_hi =
-                    (log_min + (log_max - log_min) * (i + 1) as f32 / n as f32).exp();
+                let freq_hi = (log_min + (log_max - log_min) * (i + 1) as f32 / n as f32).exp();
                 (freq_lo, freq_hi)
             })
             .collect();
@@ -90,7 +84,6 @@ impl BinLayout {
         let mut ranges: Vec<(usize, usize, f32)> = Vec::with_capacity(n);
 
         for (i, &(freq_lo, freq_hi)) in freqs.iter().enumerate() {
-
             let f_lo = freq_lo / freq_per_bin;
             let f_hi = freq_hi / freq_per_bin;
 

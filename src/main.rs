@@ -25,7 +25,7 @@ extern "C" fn shutdown_handler(_sig: std::ffi::c_int) {
 }
 
 #[derive(Parser)]
-#[command(name = "termwave", about = "Terminal audio visualizer")]
+#[command(name = "specterm", about = "Terminal audio visualizer")]
 struct Cli {
     /// Visualization mode
     #[arg(short, long)]
@@ -35,7 +35,7 @@ struct Cli {
     #[arg(short, long)]
     device: Option<String>,
 
-    /// Color theme (loaded from ~/.config/termwave/themes/)
+    /// Color theme (loaded from ~/.config/specterm/themes/)
     #[arg(short, long)]
     theme: Option<String>,
 
@@ -334,10 +334,7 @@ fn start_audio(
     device: Option<&str>,
     last_write: &audio::LastWriteTime,
 ) -> Result<(u32, audio::CaptureHandle)> {
-    if device.is_none()
-        || device == Some(audio::SYSTEM_AUDIO_LABEL)
-        || device == Some("system")
-    {
+    if device.is_none() || device == Some(audio::SYSTEM_AUDIO_LABEL) || device == Some("system") {
         audio::start_tap(
             mono_buf.clone(),
             (stereo.0.clone(), stereo.1.clone()),
@@ -550,7 +547,7 @@ fn check_audio_health(vis: &mut VisualizerState, audio: &mut AudioState) {
 
 fn main() -> Result<()> {
     // Install signal handlers so the tap subprocess gets cleaned up on SIGINT/SIGTERM.
-    // Without this, sleeping/waking or killing termwave leaves termwave-tap orphaned.
+    // Without this, sleeping/waking or killing specterm leaves specterm-tap orphaned.
     unsafe {
         signal(SIGINT, shutdown_handler as *const () as usize);
         signal(SIGTERM, shutdown_handler as *const () as usize);
@@ -637,12 +634,9 @@ fn main() -> Result<()> {
     let high_freq = cfg.high_freq;
     let themes = theme::load_themes();
     if themes.is_empty() {
-        anyhow::bail!("No theme files found in ~/.config/termwave/themes/");
+        anyhow::bail!("No theme files found in ~/.config/specterm/themes/");
     }
-    let mut theme_idx = themes
-        .iter()
-        .position(|t| t.name == cfg.theme)
-        .unwrap_or(0);
+    let mut theme_idx = themes.iter().position(|t| t.name == cfg.theme).unwrap_or(0);
 
     let mut settings = render::Settings {
         smoothing: cfg.smoothing.clamp(0.0, 0.99),
@@ -692,7 +686,8 @@ fn main() -> Result<()> {
             (term_w + settings.bar_spacing) / stride
         } else {
             term_w
-        }.max(MIN_BARS);
+        }
+        .max(MIN_BARS);
         vis.resize_bars(num_bars);
 
         // Input handling
@@ -755,7 +750,13 @@ fn main() -> Result<()> {
                 let samples = audio.mono_buf.lock().unwrap().clone();
                 let framerate = 1.0 / dt;
                 let bars = vis.process_spectrum(
-                    &samples, audio.sample_rate, low_freq, high_freq, &settings, framerate, &settings.eq,
+                    &samples,
+                    audio.sample_rate,
+                    low_freq,
+                    high_freq,
+                    &settings,
+                    framerate,
+                    &settings.eq,
                 );
                 RenderData::Spectrum(bars)
             }
@@ -764,7 +765,14 @@ fn main() -> Result<()> {
                 let right_samples = audio.stereo.1.lock().unwrap().clone();
                 let framerate = 1.0 / dt;
                 let (left, right) = vis.process_stereo(
-                    &left_samples, &right_samples, audio.sample_rate, low_freq, high_freq, &settings, framerate, &settings.eq,
+                    &left_samples,
+                    &right_samples,
+                    audio.sample_rate,
+                    low_freq,
+                    high_freq,
+                    &settings,
+                    framerate,
+                    &settings.eq,
                 );
                 RenderData::Stereo(left, right)
             }

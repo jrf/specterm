@@ -43,12 +43,12 @@ test:
 install:
     cargo install --path .
     cd tap && swift build -c release
-    cp tap/.build/release/termwave-tap ~/.cargo/bin/
+    cp tap/.build/release/specterm-tap ~/.cargo/bin/
 
 # Uninstall
 uninstall:
-    cargo uninstall termwave
-    rm -f ~/.cargo/bin/termwave-tap
+    cargo uninstall specterm
+    rm -f ~/.cargo/bin/specterm-tap
 
 # Clean build artifacts
 clean:
