@@ -40,6 +40,12 @@ impl LastWriteTime {
     pub fn elapsed(&self) -> std::time::Duration {
         self.0.lock().unwrap().elapsed()
     }
+
+    /// Reset the timestamp to now. Used after restarting a stalled capture so
+    /// the stall detector doesn't immediately re-trigger before new samples arrive.
+    pub fn mark(&self) {
+        *self.0.lock().unwrap() = Instant::now();
+    }
 }
 
 /// Create a new shared sample buffer.

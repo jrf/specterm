@@ -127,6 +127,9 @@ const SENS_STEP: u32 = 10;
 const RESTART_COOLDOWN: Duration = Duration::from_secs(2);
 /// Audio is considered stale after this long without new samples.
 const STALE_AUDIO_THRESHOLD: Duration = Duration::from_millis(100);
+/// If no samples have arrived for this long, the capture stream is assumed wedged
+/// (e.g. ScreenCaptureKit stalled after a sleep/wake cycle) and gets restarted.
+const STREAM_STALL_THRESHOLD: Duration = Duration::from_secs(3);
 
 /// Bundles audio capture state passed between functions.
 struct AudioState {
@@ -506,8 +509,10 @@ fn check_audio_health(vis: &mut VisualizerState, audio: &mut AudioState) {
         audio.stereo.1.lock().unwrap().fill(0.0);
     }
 
-    // Auto-restart tap if it died
-    if audio.capture.tap_exited() {
+    // Auto-restart on tap death OR a wedged stream (no samples for too long).
+    // The stall case covers ScreenCaptureKit hanging after sleep/wake.
+    let stalled = audio.last_write.elapsed() > STREAM_STALL_THRESHOLD;
+    if audio.capture.tap_exited() || stalled {
         let should_restart = audio
             .last_restart_attempt
             .map(|t| t.elapsed() >= RESTART_COOLDOWN)
@@ -524,6 +529,7 @@ fn check_audio_health(vis: &mut VisualizerState, audio: &mut AudioState) {
                 Ok((sr, handle)) => {
                     audio.sample_rate = sr;
                     audio.capture = handle;
+                    audio.last_write.mark();
                     vis.reset_sensitivity();
                 }
                 Err(_) => {

@@ -16,6 +16,7 @@
 - Braille rendering — block elements (▁▂▃▄▅▆▇█) give 8 subdivisions per cell vs braille's 4 vertically. Only would help wave/scope modes.
 
 ## Done
+- [x] Auto-restart wedged capture stream (heals stuck screen-recording indicator after sleep/wake) #bug
 - [x] Core audio capture and spectrum rendering with FFT pipeline #feature
 - [x] Dual-resolution FFT and logarithmic frequency binning #improvement
 - [x] Waveform, oscilloscope, and stereo visualizer modes #feature
