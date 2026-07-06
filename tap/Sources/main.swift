@@ -31,74 +31,60 @@ class AudioTap: NSObject, SCStreamOutput, SCStreamDelegate {
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .audio else { return }
-
         guard CMSampleBufferDataIsReady(sampleBuffer) else { return }
-        guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
 
-        let length = CMBlockBufferGetDataLength(blockBuffer)
-        guard length > 0 else { return }
-
-        var data = Data(count: length)
-        data.withUnsafeMutableBytes { rawBuf in
-            guard let ptr = rawBuf.baseAddress else { return }
-            CMBlockBufferCopyDataBytes(blockBuffer, atOffset: 0, dataLength: length, destination: ptr)
+        // ScreenCaptureKit delivers audio as non-interleaved (planar) Float32 —
+        // channels come as separate buffers in the AudioBufferList. The old
+        // CMSampleBufferGetDataBuffer path returned only channel 0, so the Rust
+        // side saw the same signal on both "L" and "R". We fetch the full ABL
+        // and normalize to per-channel arrays regardless of layout.
+        guard let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer),
+              let asbdPtr = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc) else {
+            return
         }
+        let asbd = asbdPtr.pointee
+        let channels = Int(asbd.mChannelsPerFrame)
+        let isPlanar = (asbd.mFormatFlags & AudioFormatFlags(kAudioFormatFlagIsNonInterleaved)) != 0
 
-        let floatCount = length / MemoryLayout<Float>.size
-        let floats = data.withUnsafeBytes { buf in
-            Array(buf.bindMemory(to: Float.self).prefix(floatCount))
+        guard let channelData = extractChannels(from: sampleBuffer, channels: channels, isPlanar: isPlanar),
+              let framesPerChannel = channelData.first?.count,
+              framesPerChannel > 0 else {
+            return
         }
-
-        let channels = channelCount(from: sampleBuffer)
 
         let output: [Float]
         if monoMode {
-            // Mix down to mono
-            if channels > 1 {
-                output = stride(from: 0, to: floats.count - (channels - 1), by: channels).map { i in
-                    var sum: Float = 0
-                    for ch in 0..<channels {
-                        sum += floats[i + ch]
-                    }
-                    return sum / Float(channels)
-                }
-            } else {
-                output = floats
+            var mono = [Float](repeating: 0, count: framesPerChannel)
+            for ch in channelData {
+                let n = min(ch.count, framesPerChannel)
+                for i in 0..<n { mono[i] += ch[i] }
             }
-        } else if channels >= 2 {
-            // Send interleaved stereo (first 2 channels only)
-            if channels == 2 {
-                output = floats
-            } else {
-                // Extract just L/R from >2 channel input
-                var stereo: [Float] = []
-                stereo.reserveCapacity(floats.count / channels * 2)
-                for i in stride(from: 0, to: floats.count - (channels - 1), by: channels) {
-                    stereo.append(floats[i])
-                    stereo.append(floats[i + 1])
-                }
-                output = stereo
+            let denom = Float(channelData.count)
+            if denom > 1 {
+                for i in 0..<framesPerChannel { mono[i] /= denom }
             }
+            output = mono
         } else {
-            // Mono source: duplicate to stereo
+            // Interleaved stereo (L,R,L,R...) from channels 0 and 1.
+            // Mono source: duplicate.
+            let left = channelData[0]
+            let right = channelData.count > 1 ? channelData[1] : channelData[0]
             var stereo: [Float] = []
-            stereo.reserveCapacity(floats.count * 2)
-            for s in floats {
-                stereo.append(s)
-                stereo.append(s)
+            stereo.reserveCapacity(framesPerChannel * 2)
+            for i in 0..<framesPerChannel {
+                stereo.append(left[i])
+                stereo.append(i < right.count ? right[i] : 0)
             }
             output = stereo
         }
 
-        // Write raw f32 bytes to stdout
         output.withUnsafeBufferPointer { buf in
-            let bytes = UnsafeRawBufferPointer(buf)
-            let outData = Data(bytes)
-            outputHandle.write(outData)
+            outputHandle.write(Data(UnsafeRawBufferPointer(buf)))
         }
 
         if samplesReceived == 0 {
-            log("receiving audio (\(channels)ch → \(monoMode ? "mono" : "stereo"), \(floatCount) samples in first buffer)")
+            let layout = isPlanar ? "planar" : "interleaved"
+            log("receiving audio (\(channels)ch \(layout) → \(monoMode ? "mono" : "stereo"), \(framesPerChannel) frames)")
         }
         samplesReceived += UInt64(output.count)
     }
@@ -108,14 +94,70 @@ class AudioTap: NSObject, SCStreamOutput, SCStreamDelegate {
         exit(1)
     }
 
-    private func channelCount(from sampleBuffer: CMSampleBuffer) -> Int {
-        guard let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer) else {
-            return 2
+    /// Pull per-channel Float32 arrays from a CMSampleBuffer regardless of
+    /// whether the audio is delivered interleaved or as non-interleaved planes.
+    private func extractChannels(from sampleBuffer: CMSampleBuffer, channels: Int, isPlanar: Bool) -> [[Float]]? {
+        // AudioBufferList is variable-length — query the required size first.
+        var sizeNeeded = 0
+        var status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer,
+            bufferListSizeNeededOut: &sizeNeeded,
+            bufferListOut: nil,
+            bufferListSize: 0,
+            blockBufferAllocator: nil,
+            blockBufferMemoryAllocator: nil,
+            flags: 0,
+            blockBufferOut: nil
+        )
+        guard status == noErr, sizeNeeded > 0 else { return nil }
+
+        let ablRaw = UnsafeMutableRawPointer.allocate(
+            byteCount: sizeNeeded,
+            alignment: MemoryLayout<AudioBufferList>.alignment
+        )
+        defer { ablRaw.deallocate() }
+        let ablPtr = ablRaw.assumingMemoryBound(to: AudioBufferList.self)
+
+        var blockBuffer: CMBlockBuffer?
+        status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer,
+            bufferListSizeNeededOut: nil,
+            bufferListOut: ablPtr,
+            bufferListSize: sizeNeeded,
+            blockBufferAllocator: nil,
+            blockBufferMemoryAllocator: nil,
+            flags: 0,
+            blockBufferOut: &blockBuffer
+        )
+        guard status == noErr else { return nil }
+
+        let bufferList = UnsafeMutableAudioBufferListPointer(ablPtr)
+
+        if isPlanar {
+            var out: [[Float]] = []
+            out.reserveCapacity(bufferList.count)
+            for buf in bufferList {
+                guard let ptr = buf.mData?.assumingMemoryBound(to: Float.self) else { continue }
+                let count = Int(buf.mDataByteSize) / MemoryLayout<Float>.size
+                out.append(Array(UnsafeBufferPointer(start: ptr, count: count)))
+            }
+            return out.isEmpty ? nil : out
+        } else {
+            guard bufferList.count > 0,
+                  let ptr = bufferList[0].mData?.assumingMemoryBound(to: Float.self) else {
+                return nil
+            }
+            let total = Int(bufferList[0].mDataByteSize) / MemoryLayout<Float>.size
+            let frames = channels > 0 ? total / channels : 0
+            guard frames > 0 else { return nil }
+            var out = [[Float]](repeating: [Float](repeating: 0, count: frames), count: channels)
+            for f in 0..<frames {
+                for ch in 0..<channels {
+                    out[ch][f] = ptr[f * channels + ch]
+                }
+            }
+            return out
         }
-        guard let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc) else {
-            return 2
-        }
-        return Int(asbd.pointee.mChannelsPerFrame)
     }
 }
 

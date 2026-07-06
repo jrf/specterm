@@ -1,9 +1,7 @@
 # Build and install to ~/.cargo/bin
 
-# default:
-#     @just --list
-
-default: install
+default:
+    @just --list
 
 # Build in debug mode
 build:
