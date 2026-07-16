@@ -2,6 +2,7 @@ import Foundation
 import ScreenCaptureKit
 import CoreMedia
 import AVFoundation
+import AppKit
 
 // specterm-tap: Captures system audio via ScreenCaptureKit and writes raw f32
 // PCM samples to stdout (native endian). Sends interleaved stereo (L, R, L, R...)
@@ -17,6 +18,7 @@ var globalTap: AudioTap?
 var globalSigSrc: DispatchSourceSignal?
 var globalTermSrc: DispatchSourceSignal?
 var globalWatchdog: DispatchSourceTimer?
+var globalSleepObs: NSObjectProtocol?
 
 @available(macOS 13.0, *)
 class AudioTap: NSObject, SCStreamOutput, SCStreamDelegate {
@@ -234,6 +236,22 @@ func setup() async throws {
     }
     termSrc.resume()
     globalTermSrc = termSrc
+
+    // Clean shutdown before sleep: replayd otherwise holds a zombie SCStream
+    // reference across sleep/wake, which strands the screen-recording indicator
+    // and can send the daemon into a CPU-spin. Exiting cleanly here lets
+    // specterm's stall detector respawn a fresh tap after wake.
+    globalSleepObs = NSWorkspace.shared.notificationCenter.addObserver(
+        forName: NSWorkspace.willSleepNotification,
+        object: nil,
+        queue: .main
+    ) { _ in
+        log("system will sleep, stopping stream cleanly...")
+        Task {
+            try? await globalStream?.stopCapture()
+            exit(0)
+        }
+    }
 
     // Watchdog: exit if parent process dies (reparented to launchd, ppid == 1).
     // This prevents orphaned tap processes after sleep/wake or unclean shutdown.

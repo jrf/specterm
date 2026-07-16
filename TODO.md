@@ -1,6 +1,7 @@
 # specterm — TODO
 
 ## Now
+- [ ] Clean tap shutdown on sleep — tap subscribes to `NSWorkspaceWillSleepNotification` so replayd sees a clean SCStream disconnect instead of a zombie client across sleep/wake #bug
 
 ## Next
 - [ ] Auto-sensitivity cap — `sens` grows unbounded for quiet audio (1% per frame compounds to 392x in 10s); add a max cap and possibly raise default `noise_floor` above 0.0 #bug
