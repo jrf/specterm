@@ -78,7 +78,7 @@ Press `s` to open the settings overlay (visualizer keeps running behind it). Adj
 - **Bar spacing** — gap between bars (0–4)
 - **Sensitivity** — manual gain adjustment (10–500%)
 
-All settings persist to `~/.config/specterm/config.toml`. To keep in-app changes for the current session only without overwriting your config file, run with `--no-save`.
+By default, in-app changes apply only to the current session and never overwrite your config file. To persist them, run with `--save`, or set `save_settings = true` in `~/.config/specterm/config.toml`.
 
 ## System audio capture
 

@@ -26,6 +26,9 @@ pub struct Config {
     pub sensitivity: u32,
     /// Per-band equalizer gains (evenly distributed across frequency range).
     pub eq: Vec<f32>,
+    /// Allow in-app settings changes to be written back to this config file.
+    /// Defaults to false so the app never overwrites your config unless you opt in.
+    pub save_settings: bool,
 }
 
 impl Default for Config {
@@ -44,6 +47,7 @@ impl Default for Config {
             bar_spacing: 1,
             sensitivity: 100,
             eq: vec![1.0, 1.0, 1.0, 1.0, 1.0],
+            save_settings: false,
         }
     }
 }
@@ -100,6 +104,7 @@ fn add_comments(toml: &str) -> String {
         ("bar_spacing =", "# Gap between bars in terminal columns (0-4)"),
         ("sensitivity =", "# Sensitivity in percent (100 = normal, higher = louder)"),
         ("eq =", "# Per-band equalizer gains (evenly distributed across frequency range).\n# Default [1.0, 1.0, 1.0, 1.0, 1.0] = flat. Values > 1.0 boost, < 1.0 cut."),
+        ("save_settings =", "# Allow in-app settings changes to overwrite this file (default false)"),
     ];
 
     let mut result = String::with_capacity(toml.len() * 2);

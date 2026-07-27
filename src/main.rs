@@ -79,9 +79,9 @@ struct Cli {
     #[arg(long)]
     list_devices: bool,
 
-    /// Don't persist in-app settings changes back to the config file
+    /// Persist in-app settings changes back to the config file for this session
     #[arg(long)]
-    no_save: bool,
+    save: bool,
 }
 
 #[derive(Clone, PartialEq)]
@@ -578,8 +578,10 @@ fn main() -> Result<()> {
     }
 
     // Load config, then let CLI args override
-    let persist_settings = !cli.no_save;
     let mut cfg = config::load();
+    // In-app changes only overwrite the config when explicitly opted in,
+    // either via --save for this session or save_settings = true in the file.
+    let persist_settings = cli.save || cfg.save_settings;
     if let Some(ref m) = cli.mode {
         cfg.mode = m.clone();
     }
