@@ -78,6 +78,10 @@ struct Cli {
     /// List available audio input devices
     #[arg(long)]
     list_devices: bool,
+
+    /// Don't persist in-app settings changes back to the config file
+    #[arg(long)]
+    no_save: bool,
 }
 
 #[derive(Clone, PartialEq)]
@@ -359,6 +363,7 @@ fn save_state(
     settings: &render::Settings,
     theme_name: &str,
     mode: &Mode,
+    persist: bool,
 ) {
     cfg.smoothing = settings.smoothing;
     cfg.monstercat = settings.monstercat;
@@ -372,7 +377,9 @@ fn save_state(
     cfg.sensitivity = settings.sensitivity;
     cfg.eq = settings.eq.clone();
 
-    let _ = config::save(cfg);
+    if persist {
+        let _ = config::save(cfg);
+    }
 }
 
 /// What the main loop should do after handling input.
@@ -390,13 +397,14 @@ fn handle_settings_input(
     theme_idx: &mut usize,
     cfg: &mut config::Config,
     mode: &Mode,
+    persist: bool,
 ) -> Result<LoopAction> {
     if let Some(ref mut sstate) = settings_state {
         if let Some(key) = render::poll_key(Duration::ZERO)? {
             match sstate.handle_key(key, settings, themes.len()) {
                 render::SettingsAction::Close => {
                     *theme_idx = settings.theme_idx;
-                    save_state(cfg, settings, &themes[*theme_idx].name, mode);
+                    save_state(cfg, settings, &themes[*theme_idx].name, mode, persist);
                     *settings_state = None;
                 }
                 render::SettingsAction::Quit => return Ok(LoopAction::Quit),
@@ -421,13 +429,14 @@ fn handle_normal_input(
     theme_idx: usize,
     cfg: &mut config::Config,
     audio: &mut AudioState,
+    persist: bool,
 ) -> Result<LoopAction> {
     match render::poll_input(Duration::ZERO)? {
         render::Action::Quit => return Ok(LoopAction::Quit),
         render::Action::CycleMode => {
             *mode = mode.next();
             vis.reset_bars();
-            save_state(cfg, settings, &themes[theme_idx].name, mode);
+            save_state(cfg, settings, &themes[theme_idx].name, mode, persist);
             return Ok(LoopAction::Skip);
         }
         render::Action::SelectDevice => {
@@ -462,24 +471,24 @@ fn handle_normal_input(
         }
         render::Action::SensUp => {
             settings.sensitivity = (settings.sensitivity + SENS_STEP).min(500);
-            save_state(cfg, settings, &themes[theme_idx].name, mode);
+            save_state(cfg, settings, &themes[theme_idx].name, mode, persist);
             return Ok(LoopAction::Skip);
         }
         render::Action::SensDown => {
             settings.sensitivity = settings.sensitivity.saturating_sub(SENS_STEP).max(10);
-            save_state(cfg, settings, &themes[theme_idx].name, mode);
+            save_state(cfg, settings, &themes[theme_idx].name, mode, persist);
             return Ok(LoopAction::Skip);
         }
         render::Action::MoreBars => {
             // Narrower bars = more bars on screen
             settings.bar_width = settings.bar_width.saturating_sub(1).max(1);
-            save_state(cfg, settings, &themes[theme_idx].name, mode);
+            save_state(cfg, settings, &themes[theme_idx].name, mode, persist);
             return Ok(LoopAction::Skip);
         }
         render::Action::FewerBars => {
             // Wider bars = fewer bars on screen
             settings.bar_width = (settings.bar_width + 1).min(8);
-            save_state(cfg, settings, &themes[theme_idx].name, mode);
+            save_state(cfg, settings, &themes[theme_idx].name, mode, persist);
             return Ok(LoopAction::Skip);
         }
         render::Action::None => {}
@@ -569,6 +578,7 @@ fn main() -> Result<()> {
     }
 
     // Load config, then let CLI args override
+    let persist_settings = !cli.no_save;
     let mut cfg = config::load();
     if let Some(ref m) = cli.mode {
         cfg.mode = m.clone();
@@ -705,6 +715,7 @@ fn main() -> Result<()> {
                 &mut theme_idx,
                 &mut cfg,
                 &mode,
+                persist_settings,
             )? {
                 LoopAction::Quit => break,
                 LoopAction::Skip => continue,
@@ -721,6 +732,7 @@ fn main() -> Result<()> {
                 theme_idx,
                 &mut cfg,
                 &mut audio,
+                persist_settings,
             )? {
                 LoopAction::Quit => break,
                 LoopAction::Skip => continue,
