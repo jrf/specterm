@@ -237,16 +237,21 @@ func setup() async throws {
     termSrc.resume()
     globalTermSrc = termSrc
 
-    // Clean shutdown before sleep: replayd otherwise holds a zombie SCStream
-    // reference across sleep/wake, which strands the screen-recording indicator
-    // and can send the daemon into a CPU-spin. Exiting cleanly here lets
-    // specterm's stall detector respawn a fresh tap after wake.
+    let parentPid = getppid()
+
+    // Shut down the entire application before sleep. replayd can otherwise hold
+    // a zombie SCStream reference across sleep/wake, stranding the
+    // screen-recording indicator and sending the daemon into a CPU-spin.
+    //
+    // Signal the parent before exiting so specterm's tap health checker cannot
+    // interpret our clean exit as a crash and respawn capture after wake.
     globalSleepObs = NSWorkspace.shared.notificationCenter.addObserver(
         forName: NSWorkspace.willSleepNotification,
         object: nil,
         queue: .main
     ) { _ in
-        log("system will sleep, stopping stream cleanly...")
+        log("system will sleep, stopping specterm...")
+        kill(parentPid, SIGTERM)
         Task {
             try? await globalStream?.stopCapture()
             exit(0)
@@ -255,7 +260,6 @@ func setup() async throws {
 
     // Watchdog: exit if parent process dies (reparented to launchd, ppid == 1).
     // This prevents orphaned tap processes after sleep/wake or unclean shutdown.
-    let parentPid = getppid()
     let watchdog = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
     watchdog.schedule(deadline: .now() + 2, repeating: 2.0)
     watchdog.setEventHandler {
