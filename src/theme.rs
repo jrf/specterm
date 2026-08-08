@@ -362,7 +362,7 @@ fn load_catalog_paths(catalog_path: &Path) -> Vec<String> {
     let Ok(contents) = fs::read_to_string(catalog_path) else {
         return Vec::new();
     };
-    let Ok(catalog) = contents.parse::<toml::Value>() else {
+    let Ok(catalog) = contents.parse::<toml::Table>() else {
         return Vec::new();
     };
     catalog
@@ -466,20 +466,9 @@ key = "sky"
         )
         .unwrap();
         let catalog = root.join("catalog.toml");
-        std::fs::write(
-            &catalog,
-            format!(
-                "themes = [\"{}\"]\n",
-                themes_dir.join("synthetic-theme.toml").display()
-            ),
-        )
-        .unwrap();
+        std::fs::write(&catalog, "themes = [\"~/themes/synthetic-theme.toml\"]\n").unwrap();
 
-        let themes = load_themes_from_paths(
-            catalog.to_str().unwrap(),
-            themes_dir.join("synthetic-theme.toml").to_str().unwrap(),
-            &root,
-        );
+        let themes = load_themes_from_paths(catalog.to_str().unwrap(), "", &root);
         assert_eq!(themes.len(), 1);
         assert_eq!(themes[0].name, "synthetic theme");
         assert_eq!(themes[0].wave_color, Color::Rgb(0xcb, 0xa6, 0xf7));
