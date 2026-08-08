@@ -1,4 +1,4 @@
 /target
 tap/.build
 tap/.swiftpm
-Cargo.lock
+dist/

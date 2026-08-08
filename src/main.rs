@@ -25,7 +25,7 @@ extern "C" fn shutdown_handler(_sig: std::ffi::c_int) {
 }
 
 #[derive(Parser)]
-#[command(name = "specterm", about = "Terminal audio visualizer")]
+#[command(name = "specterm", about = "Terminal audio visualizer", version)]
 struct Cli {
     /// Visualization mode
     #[arg(short, long)]
