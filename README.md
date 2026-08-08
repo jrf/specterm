@@ -61,6 +61,11 @@ specterm --list-devices         # list available audio devices
 
 Seven built-in color themes, selectable via `--theme` or in the settings menu (`s`):
 
+Additional shared themes are loaded from `~/.config/themes/`. Files in
+`~/.config/specterm/themes/` override shared or embedded themes with the same
+name. Shared palettes without a `[visualizer]` section receive a gradient from
+their semantic color range automatically.
+
 - **classic** — blue, cyan, green, yellow, red
 - **fire** — dark red to bright yellow
 - **ocean** — deep navy to bright aqua

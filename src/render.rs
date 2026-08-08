@@ -164,10 +164,8 @@ pub fn device_menu(
                     KeyCode::Up | KeyCode::Char('k') => {
                         selected = selected.saturating_sub(1);
                     }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        if selected + 1 < total {
-                            selected += 1;
-                        }
+                    KeyCode::Down | KeyCode::Char('j') if selected + 1 < total => {
+                        selected += 1;
                     }
                     KeyCode::Enter => {
                         return if selected == 0 {
@@ -248,10 +246,8 @@ impl SettingsState {
             KeyCode::Up | KeyCode::Char('k') => {
                 self.selected = self.selected.saturating_sub(1);
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if self.selected + 1 < self.num_items {
-                    self.selected += 1;
-                }
+            KeyCode::Down | KeyCode::Char('j') if self.selected + 1 < self.num_items => {
+                self.selected += 1;
             }
             KeyCode::Home => {
                 self.selected = 0;

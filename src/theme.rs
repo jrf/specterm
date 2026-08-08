@@ -6,12 +6,22 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ratatui::style::Color;
 
 /// Number of entries in the precomputed gradient lookup table.
 const GRADIENT_LUT_SIZE: usize = 256;
+
+const EMBEDDED_THEMES: &[(&str, &str)] = &[
+    ("classic", include_str!("../themes/classic.toml")),
+    ("fire", include_str!("../themes/fire.toml")),
+    ("matrix", include_str!("../themes/matrix.toml")),
+    ("mono", include_str!("../themes/mono.toml")),
+    ("ocean", include_str!("../themes/ocean.toml")),
+    ("purple", include_str!("../themes/purple.toml")),
+    ("synthwave", include_str!("../themes/synthwave.toml")),
+];
 
 /// A color theme defines the gradient stops for spectrum bars and the line
 /// color used for waveform/oscilloscope modes.
@@ -229,29 +239,41 @@ fn parse_theme(name: &str, content: &str) -> Option<Theme> {
         }
     }
 
-    // Parse [visualizer]
-    let vis = table.get("visualizer")?.as_table()?;
-
-    let gradient_arr = vis.get("gradient")?.as_array()?;
-    let gradient: Vec<Color> = gradient_arr
-        .iter()
-        .filter_map(|v| v.as_str().and_then(|s| resolve_color(s, &palette)))
-        .collect();
+    let vis = table.get("visualizer").and_then(toml::Value::as_table);
+    let gradient = vis
+        .and_then(|visualizer| visualizer.get("gradient"))
+        .and_then(toml::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| {
+                    value
+                        .as_str()
+                        .and_then(|color| resolve_color(color, &palette))
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|gradient| !gradient.is_empty())
+        .unwrap_or_else(|| derived_gradient(&palette));
 
     if gradient.is_empty() {
         return None;
     }
 
     let wave_color = vis
-        .get("wave_color")
+        .and_then(|visualizer| visualizer.get("wave_color"))
         .and_then(|v| v.as_str())
         .and_then(|s| resolve_color(s, &palette))
+        .or_else(|| resolve_ui_color(&table, "accent", &palette))
+        .or_else(|| first_palette_color(&palette, &["magenta", "mauve", "pink"]))
         .unwrap_or(gradient[gradient.len() / 2]);
 
     let scope_color = vis
-        .get("scope_color")
+        .and_then(|visualizer| visualizer.get("scope_color"))
         .and_then(|v| v.as_str())
         .and_then(|s| resolve_color(s, &palette))
+        .or_else(|| resolve_ui_color(&table, "key", &palette))
+        .or_else(|| first_palette_color(&palette, &["cyan", "sky", "blue1"]))
         .unwrap_or(gradient[gradient.len() / 2]);
 
     let gradient_lut = build_gradient_lut(&gradient);
@@ -264,6 +286,57 @@ fn parse_theme(name: &str, content: &str) -> Option<Theme> {
     })
 }
 
+fn resolve_ui_color(
+    table: &toml::Table,
+    role: &str,
+    palette: &HashMap<String, Color>,
+) -> Option<Color> {
+    table
+        .get("ui")
+        .and_then(toml::Value::as_table)
+        .and_then(|ui| ui.get(role))
+        .and_then(toml::Value::as_str)
+        .and_then(|value| resolve_color(value, palette))
+}
+
+fn first_palette_color(palette: &HashMap<String, Color>, names: &[&str]) -> Option<Color> {
+    names.iter().find_map(|name| palette.get(*name).copied())
+}
+
+fn derived_gradient(palette: &HashMap<String, Color>) -> Vec<Color> {
+    let groups: &[&[&str]] = &[
+        &["red", "maroon"],
+        &["orange", "peach"],
+        &["yellow"],
+        &["green", "lime"],
+        &["teal"],
+        &["cyan", "sky", "aqua"],
+        &["blue", "sapphire"],
+        &["purple", "mauve"],
+        &["magenta", "pink"],
+    ];
+    let mut gradient = Vec::new();
+    for names in groups {
+        if let Some(color) = first_palette_color(palette, names) {
+            if !gradient.contains(&color) {
+                gradient.push(color);
+            }
+        }
+    }
+    if gradient.len() < 2 {
+        for name in [
+            "bg", "base", "fg_muted", "overlay0", "fg_dim", "subtext0", "fg", "text",
+        ] {
+            if let Some(color) = palette.get(name).copied() {
+                if !gradient.contains(&color) {
+                    gradient.push(color);
+                }
+            }
+        }
+    }
+    gradient
+}
+
 /// Get the themes directory path (~/.config/specterm/themes/).
 fn themes_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
@@ -273,13 +346,13 @@ fn themes_dir() -> PathBuf {
         .join("themes")
 }
 
-/// Load all themes from the themes directory. Returns an empty vec if no
-/// valid theme files are found.
-pub fn load_themes() -> Vec<Theme> {
-    let dir = themes_dir();
-    let mut themes = Vec::new();
+fn shared_themes_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".config").join("themes")
+}
 
-    if let Ok(entries) = fs::read_dir(&dir) {
+fn overlay_theme_dir(themes: &mut Vec<Theme>, dir: &Path) {
+    if let Ok(entries) = fs::read_dir(dir) {
         let mut entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
         entries.sort_by_key(|e| e.file_name());
 
@@ -293,12 +366,57 @@ pub fn load_themes() -> Vec<Theme> {
                     .to_string();
                 if let Ok(content) = fs::read_to_string(&path) {
                     if let Some(theme) = parse_theme(&name, &content) {
+                        themes.retain(|existing| existing.name != name);
                         themes.push(theme);
                     }
                 }
             }
         }
     }
+}
+
+/// Load embedded themes, shared themes, then app-specific overrides.
+pub fn load_themes() -> Vec<Theme> {
+    let mut themes = EMBEDDED_THEMES
+        .iter()
+        .filter_map(|(name, content)| parse_theme(name, content))
+        .collect::<Vec<_>>();
+
+    overlay_theme_dir(&mut themes, &shared_themes_dir());
+    overlay_theme_dir(&mut themes, &themes_dir());
+    themes.sort_by(|left, right| left.name.cmp(&right.name));
 
     themes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_theme, Color};
+
+    #[test]
+    fn shared_palette_derives_visualizer_roles() {
+        let theme = parse_theme(
+            "catppuccin-mocha",
+            r##"
+[colors]
+red = "#f38ba8"
+peach = "#fab387"
+yellow = "#f9e2af"
+green = "#a6e3a1"
+teal = "#94e2d5"
+sky = "#89dceb"
+blue = "#89b4fa"
+mauve = "#cba6f7"
+
+[ui]
+accent = "mauve"
+key = "sky"
+"##,
+        )
+        .expect("shared theme");
+
+        assert!(theme.gradient.len() >= 6);
+        assert_eq!(theme.wave_color, Color::Rgb(0xcb, 0xa6, 0xf7));
+        assert_eq!(theme.scope_color, Color::Rgb(0x89, 0xdc, 0xeb));
+    }
 }

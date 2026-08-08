@@ -652,7 +652,7 @@ fn main() -> Result<()> {
     let high_freq = cfg.high_freq;
     let themes = theme::load_themes();
     if themes.is_empty() {
-        anyhow::bail!("No theme files found in ~/.config/specterm/themes/");
+        anyhow::bail!("No embedded, shared, or Specterm-specific themes could be loaded");
     }
     let mut theme_idx = themes.iter().position(|t| t.name == cfg.theme).unwrap_or(0);
 
@@ -700,12 +700,10 @@ fn main() -> Result<()> {
         // Bar width and spacing are authoritative; count fills the terminal.
         let term_w = terminal.size()?.width.saturating_sub(2) as usize;
         let stride = settings.bar_width + settings.bar_spacing;
-        let num_bars = if stride > 0 {
-            (term_w + settings.bar_spacing) / stride
-        } else {
-            term_w
-        }
-        .max(MIN_BARS);
+        let num_bars = (term_w + settings.bar_spacing)
+            .checked_div(stride)
+            .unwrap_or(term_w)
+            .max(MIN_BARS);
         vis.resize_bars(num_bars);
 
         // Input handling
