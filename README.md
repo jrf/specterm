@@ -15,11 +15,15 @@ Terminal audio visualizer for macOS. Renders real-time spectrum bars, waveforms,
 
 Requires Rust and (optionally) Swift for system audio capture.
 
-```
-just
+```fish
+just install
 ```
 
 This builds and installs `specterm` and `specterm-tap` to `~/.cargo/bin`.
+
+Maintainers can use `just package <version>` to build an ad-hoc-signed DMG for
+local packaging validation. Public releases are Developer ID-signed and
+notarized by the tag-driven GitHub Actions workflow; see `RELEASING.md`.
 
 ## Usage
 

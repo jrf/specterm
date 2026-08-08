@@ -43,6 +43,10 @@ install:
     cd tap && swift build -c release
     cp tap/.build/release/specterm-tap ~/.cargo/bin/
 
+# Build an ad-hoc-signed DMG for local release-pipeline validation
+package version:
+    ./scripts/package-release.sh {{version}}
+
 # Uninstall
 uninstall:
     cargo uninstall specterm
