@@ -1,8 +1,6 @@
 //! Color themes for the visualizer.
 //!
-//! Themes are loaded from TOML files in `~/.config/specterm/themes/`. Each file
-//! defines a `[colors]` table of named hex colors and a `[visualizer]` table
-//! that references those names for the gradient, wave, and scope colors.
+//! Themes are loaded only from explicit selected-theme and catalog paths.
 
 use std::collections::HashMap;
 use std::fs;
@@ -13,21 +11,12 @@ use ratatui::style::Color;
 /// Number of entries in the precomputed gradient lookup table.
 const GRADIENT_LUT_SIZE: usize = 256;
 
-const EMBEDDED_THEMES: &[(&str, &str)] = &[
-    ("classic", include_str!("../themes/classic.toml")),
-    ("fire", include_str!("../themes/fire.toml")),
-    ("matrix", include_str!("../themes/matrix.toml")),
-    ("mono", include_str!("../themes/mono.toml")),
-    ("ocean", include_str!("../themes/ocean.toml")),
-    ("purple", include_str!("../themes/purple.toml")),
-    ("synthwave", include_str!("../themes/synthwave.toml")),
-];
-
 /// A color theme defines the gradient stops for spectrum bars and the line
 /// color used for waveform/oscilloscope modes.
 #[derive(Clone)]
 pub struct Theme {
     pub name: String,
+    pub path: String,
     /// Original gradient stop colors. Must have at least one entry.
     pub gradient: Vec<Color>,
     /// Precomputed LUT: 256 colors uniformly spaced by perceptual arc length.
@@ -227,7 +216,12 @@ fn resolve_color(value: &str, palette: &HashMap<String, Color>) -> Option<Color>
 
 /// Load a single theme from a TOML string. The file name (without extension)
 /// is used as the theme name.
+#[cfg(test)]
 fn parse_theme(name: &str, content: &str) -> Option<Theme> {
+    parse_theme_with_path(name, "", content)
+}
+
+fn parse_theme_with_path(name: &str, path: &str, content: &str) -> Option<Theme> {
     let table: toml::Table = content.parse().ok()?;
 
     // Parse [colors] into a palette
@@ -279,6 +273,7 @@ fn parse_theme(name: &str, content: &str) -> Option<Theme> {
     let gradient_lut = build_gradient_lut(&gradient);
     Some(Theme {
         name: name.to_string(),
+        path: path.to_string(),
         gradient,
         gradient_lut,
         wave_color,
@@ -337,67 +332,104 @@ fn derived_gradient(palette: &HashMap<String, Color>) -> Vec<Color> {
     gradient
 }
 
-/// Get the themes directory path (~/.config/specterm/themes/).
-fn themes_dir() -> PathBuf {
+fn home_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home)
-        .join(".config")
-        .join("specterm")
-        .join("themes")
 }
 
-fn shared_themes_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".config").join("themes")
+/// Load the selected theme path and the explicit picker catalog.
+pub fn load_themes(catalog_path: &str, selected_path: &str) -> Vec<Theme> {
+    load_themes_from_paths(catalog_path, selected_path, &home_dir())
 }
 
-fn overlay_theme_dir(themes: &mut Vec<Theme>, dir: &Path) {
-    if let Ok(entries) = fs::read_dir(dir) {
-        let mut entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-        entries.sort_by_key(|e| e.file_name());
+fn load_themes_from_paths(catalog_path: &str, selected_path: &str, home: &Path) -> Vec<Theme> {
+    let mut themes = Vec::new();
 
-        for entry in entries {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("toml") {
-                let name = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("unknown")
-                    .to_string();
-                if let Ok(content) = fs::read_to_string(&path) {
-                    if let Some(theme) = parse_theme(&name, &content) {
-                        themes.retain(|existing| existing.name != name);
-                        themes.push(theme);
-                    }
-                }
-            }
+    if !catalog_path.is_empty() {
+        for path in load_catalog_paths(&expand_home(home, catalog_path)) {
+            load_theme_path(&mut themes, &path, home);
         }
     }
-}
-
-/// Load embedded themes, shared themes, then app-specific overrides.
-pub fn load_themes() -> Vec<Theme> {
-    let mut themes = EMBEDDED_THEMES
-        .iter()
-        .filter_map(|(name, content)| parse_theme(name, content))
-        .collect::<Vec<_>>();
-
-    overlay_theme_dir(&mut themes, &shared_themes_dir());
-    overlay_theme_dir(&mut themes, &themes_dir());
+    if !selected_path.is_empty() {
+        load_theme_path(&mut themes, selected_path, home);
+    }
     themes.sort_by(|left, right| left.name.cmp(&right.name));
 
     themes
 }
 
+fn load_catalog_paths(catalog_path: &Path) -> Vec<String> {
+    let Ok(contents) = fs::read_to_string(catalog_path) else {
+        return Vec::new();
+    };
+    let Ok(catalog) = contents.parse::<toml::Value>() else {
+        return Vec::new();
+    };
+    catalog
+        .get("themes")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(toml::Value::as_str)
+        .map(str::to_string)
+        .collect()
+}
+
+fn load_theme_path(themes: &mut Vec<Theme>, configured_path: &str, home: &Path) {
+    let path = expand_home(home, configured_path);
+    let Ok(content) = fs::read_to_string(&path) else {
+        return;
+    };
+    let name = theme_name(&path);
+    let Some(theme) = parse_theme_with_path(&name, configured_path, &content) else {
+        return;
+    };
+    themes.retain(|existing| existing.name != name);
+    themes.push(theme);
+}
+
+fn expand_home(home: &Path, configured_path: &str) -> PathBuf {
+    configured_path
+        .strip_prefix("~/")
+        .map(|rest| home.join(rest))
+        .unwrap_or_else(|| PathBuf::from(configured_path))
+}
+
+fn theme_name(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("theme")
+        .replace('-', " ")
+}
+
+/// Emergency theme used only when the shared catalog cannot be loaded.
+pub fn fallback_theme() -> Theme {
+    let gradient = vec![
+        Color::Rgb(0xff, 0x75, 0x7f),
+        Color::Rgb(0xff, 0xc7, 0x77),
+        Color::Rgb(0xc3, 0xe8, 0x8d),
+        Color::Rgb(0x86, 0xe1, 0xfc),
+        Color::Rgb(0x82, 0xaa, 0xff),
+        Color::Rgb(0xc0, 0x99, 0xff),
+    ];
+    let gradient_lut = build_gradient_lut(&gradient);
+    Theme {
+        name: "tokyo-night-moon".to_string(),
+        path: String::new(),
+        gradient,
+        gradient_lut,
+        wave_color: Color::Rgb(0xc0, 0x99, 0xff),
+        scope_color: Color::Rgb(0x86, 0xe1, 0xfc),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{parse_theme, Color};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    #[test]
-    fn shared_palette_derives_visualizer_roles() {
-        let theme = parse_theme(
-            "catppuccin-mocha",
-            r##"
+    use super::{load_themes_from_paths, parse_theme, Color};
+
+    const SHARED_THEME: &str = r##"
 [colors]
 red = "#f38ba8"
 peach = "#fab387"
@@ -411,12 +443,56 @@ mauve = "#cba6f7"
 [ui]
 accent = "mauve"
 key = "sky"
-"##,
-        )
-        .expect("shared theme");
+"##;
+
+    #[test]
+    fn shared_palette_derives_visualizer_roles() {
+        let theme = parse_theme("catppuccin-mocha", SHARED_THEME).expect("shared theme");
 
         assert!(theme.gradient.len() >= 6);
         assert_eq!(theme.wave_color, Color::Rgb(0xcb, 0xa6, 0xf7));
         assert_eq!(theme.scope_color, Color::Rgb(0x89, 0xdc, 0xeb));
+    }
+
+    #[test]
+    fn catalog_loads_only_explicit_theme_paths() {
+        let root = test_root();
+        let themes_dir = root.join("themes");
+        std::fs::create_dir_all(&themes_dir).unwrap();
+        std::fs::write(themes_dir.join("synthetic-theme.toml"), SHARED_THEME).unwrap();
+        std::fs::write(
+            themes_dir.join("unlisted.toml"),
+            SHARED_THEME.replace("#cba6f7", "#abcdef"),
+        )
+        .unwrap();
+        let catalog = root.join("catalog.toml");
+        std::fs::write(
+            &catalog,
+            format!(
+                "themes = [\"{}\"]\n",
+                themes_dir.join("synthetic-theme.toml").display()
+            ),
+        )
+        .unwrap();
+
+        let themes = load_themes_from_paths(
+            catalog.to_str().unwrap(),
+            themes_dir.join("synthetic-theme.toml").to_str().unwrap(),
+            &root,
+        );
+        assert_eq!(themes.len(), 1);
+        assert_eq!(themes[0].name, "synthetic theme");
+        assert_eq!(themes[0].wave_color, Color::Rgb(0xcb, 0xa6, 0xf7));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn test_root() -> std::path::PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        std::env::temp_dir().join(format!(
+            "specterm-theme-test-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ))
     }
 }

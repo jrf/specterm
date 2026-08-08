@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     pub mode: String,
     pub theme: String,
+    pub theme_catalog: String,
     pub fps: u64,
     pub low_freq: f32,
     pub high_freq: f32,
@@ -26,8 +27,8 @@ pub struct Config {
     pub sensitivity: u32,
     /// Per-band equalizer gains (evenly distributed across frequency range).
     pub eq: Vec<f32>,
-    /// Allow in-app settings changes to be written back to this config file.
-    /// Defaults to false so the app never overwrites your config unless you opt in.
+    /// Allow non-theme in-app settings changes to be written back to this config file.
+    /// Theme picker changes are always session-only.
     pub save_settings: bool,
 }
 
@@ -35,7 +36,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             mode: "spectrum".to_string(),
-            theme: "classic".to_string(),
+            theme: String::new(),
+            theme_catalog: String::new(),
             fps: 60,
             low_freq: 50.0,
             high_freq: 10000.0,
@@ -91,7 +93,8 @@ pub fn save(config: &Config) -> std::io::Result<()> {
 fn add_comments(toml: &str) -> String {
     let comments: &[(&str, &str)] = &[
         ("mode =", "# Visualization mode: spectrum, wave, scope, stereo"),
-        ("theme =", "# Color theme name"),
+        ("theme =", "# Explicit path to the selected theme file"),
+        ("theme_catalog =", "# Explicit path to the picker catalog"),
         ("fps =", "# Target frames per second"),
 
         ("low_freq =", "# Low frequency cutoff in Hz"),
@@ -104,7 +107,7 @@ fn add_comments(toml: &str) -> String {
         ("bar_spacing =", "# Gap between bars in terminal columns (0-4)"),
         ("sensitivity =", "# Sensitivity in percent (100 = normal, higher = louder)"),
         ("eq =", "# Per-band equalizer gains (evenly distributed across frequency range).\n# Default [1.0, 1.0, 1.0, 1.0, 1.0] = flat. Values > 1.0 boost, < 1.0 cut."),
-        ("save_settings =", "# Allow in-app settings changes to overwrite this file (default false)"),
+        ("save_settings =", "# Allow non-theme in-app settings changes to overwrite this file (default false)"),
     ];
 
     let mut result = String::with_capacity(toml.len() * 2);

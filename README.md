@@ -33,7 +33,7 @@ specterm --mode wave            # waveform mode
 specterm --mode scope           # oscilloscope mode
 specterm --mode stereo          # stereo L/R visualization
 specterm --device "system"      # capture system audio (requires specterm-tap)
-specterm --theme fire           # use the fire color theme
+specterm --theme ~/.config/themes/fire.toml  # use an explicit theme file
 specterm --bars 128             # set number of spectrum bars
 specterm --list-devices         # list available audio devices
 ```
@@ -59,20 +59,11 @@ specterm --list-devices         # list available audio devices
 
 ## Themes
 
-Seven built-in color themes, selectable via `--theme` or in the settings menu (`s`):
-
-Additional shared themes are loaded from `~/.config/themes/`. Files in
-`~/.config/specterm/themes/` override shared or embedded themes with the same
-name. Shared palettes without a `[visualizer]` section receive a gradient from
-their semantic color range automatically.
-
-- **classic** — blue, cyan, green, yellow, red
-- **fire** — dark red to bright yellow
-- **ocean** — deep navy to bright aqua
-- **purple** — dark violet to pink
-- **matrix** — green monochrome
-- **synthwave** — indigo, violet, magenta, pink, orange
-- **mono** — grayscale
+Specterm reads explicit `theme` and `theme_catalog` paths from
+`~/.config/specterm/config.toml`. The selected file is loaded directly; the
+catalog's `themes = [...]` array supplies the settings picker. Specterm never
+scans a theme directory. Palettes without a `[visualizer]` section receive a
+gradient from their semantic color range automatically.
 
 ## Settings
 
@@ -87,7 +78,7 @@ Press `s` to open the settings overlay (visualizer keeps running behind it). Adj
 - **Bar spacing** — gap between bars (0–4)
 - **Sensitivity** — manual gain adjustment (10–500%)
 
-By default, in-app changes apply only to the current session and never overwrite your config file. To persist them, run with `--save`, or set `save_settings = true` in `~/.config/specterm/config.toml`.
+Theme changes in the settings picker always apply to the current session only and never rewrite `config.toml`. The `--save` flag and `save_settings = true` can persist other in-app settings, but they never replace the configured `theme`; edit that path directly to change the startup theme.
 
 ## System audio capture
 

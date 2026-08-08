@@ -24,8 +24,8 @@
 - [x] Waveform, oscilloscope, and stereo visualizer modes #feature
 - [x] ScreenCaptureKit system audio capture (`specterm-tap`) #feature
 - [x] Runtime device switching and enumeration #feature
-- [x] TOML-based theme system with 8 built-in themes #feature
+- [x] TOML-based theme system backed by the shared theme catalog #feature
 - [x] Non-blocking settings overlay with live preview #feature
 - [x] Auto-sensitivity, monstercat smoothing, gravity fall-off #improvement
-- [x] Config persistence and theme-aware UI #feature
+- [x] Config persistence for non-theme settings and session-only theme preview #feature
 - [x] Now-playing Apple Music track display #feature

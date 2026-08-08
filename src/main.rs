@@ -35,7 +35,7 @@ struct Cli {
     #[arg(short, long)]
     device: Option<String>,
 
-    /// Color theme (loaded from ~/.config/specterm/themes/)
+    /// Explicit path to a color theme file
     #[arg(short, long)]
     theme: Option<String>,
 
@@ -79,7 +79,7 @@ struct Cli {
     #[arg(long)]
     list_devices: bool,
 
-    /// Persist in-app settings changes back to the config file for this session
+    /// Persist non-theme in-app settings changes for this session
     #[arg(long)]
     save: bool,
 }
@@ -358,17 +358,28 @@ fn start_audio(
     }
 }
 
-fn save_state(
-    cfg: &mut config::Config,
+fn runtime_settings_changed(
+    cfg: &config::Config,
     settings: &render::Settings,
-    theme_name: &str,
     mode: &Mode,
-    persist: bool,
-) {
+) -> bool {
+    cfg.smoothing != settings.smoothing
+        || cfg.monstercat != settings.monstercat
+        || cfg.noise_floor != settings.noise_floor
+        || cfg.mode != mode.as_str()
+        || cfg.gradient_by_position != settings.gradient_by_position
+        || cfg.bar_width != settings.bar_width
+        || cfg.bar_spacing != settings.bar_spacing
+        || cfg.sensitivity != settings.sensitivity
+        || cfg.eq != settings.eq
+}
+
+fn save_state(cfg: &mut config::Config, settings: &render::Settings, mode: &Mode, persist: bool) {
+    let changed = runtime_settings_changed(cfg, settings, mode);
+
     cfg.smoothing = settings.smoothing;
     cfg.monstercat = settings.monstercat;
     cfg.noise_floor = settings.noise_floor;
-    cfg.theme = theme_name.to_string();
     cfg.mode = mode.as_str().to_string();
 
     cfg.gradient_by_position = settings.gradient_by_position;
@@ -377,7 +388,7 @@ fn save_state(
     cfg.sensitivity = settings.sensitivity;
     cfg.eq = settings.eq.clone();
 
-    if persist {
+    if persist && changed {
         let _ = config::save(cfg);
     }
 }
@@ -404,7 +415,7 @@ fn handle_settings_input(
             match sstate.handle_key(key, settings, themes.len()) {
                 render::SettingsAction::Close => {
                     *theme_idx = settings.theme_idx;
-                    save_state(cfg, settings, &themes[*theme_idx].name, mode, persist);
+                    save_state(cfg, settings, mode, persist);
                     *settings_state = None;
                 }
                 render::SettingsAction::Quit => return Ok(LoopAction::Quit),
@@ -436,7 +447,7 @@ fn handle_normal_input(
         render::Action::CycleMode => {
             *mode = mode.next();
             vis.reset_bars();
-            save_state(cfg, settings, &themes[theme_idx].name, mode, persist);
+            save_state(cfg, settings, mode, persist);
             return Ok(LoopAction::Skip);
         }
         render::Action::SelectDevice => {
@@ -471,24 +482,24 @@ fn handle_normal_input(
         }
         render::Action::SensUp => {
             settings.sensitivity = (settings.sensitivity + SENS_STEP).min(500);
-            save_state(cfg, settings, &themes[theme_idx].name, mode, persist);
+            save_state(cfg, settings, mode, persist);
             return Ok(LoopAction::Skip);
         }
         render::Action::SensDown => {
             settings.sensitivity = settings.sensitivity.saturating_sub(SENS_STEP).max(10);
-            save_state(cfg, settings, &themes[theme_idx].name, mode, persist);
+            save_state(cfg, settings, mode, persist);
             return Ok(LoopAction::Skip);
         }
         render::Action::MoreBars => {
             // Narrower bars = more bars on screen
             settings.bar_width = settings.bar_width.saturating_sub(1).max(1);
-            save_state(cfg, settings, &themes[theme_idx].name, mode, persist);
+            save_state(cfg, settings, mode, persist);
             return Ok(LoopAction::Skip);
         }
         render::Action::FewerBars => {
             // Wider bars = fewer bars on screen
             settings.bar_width = (settings.bar_width + 1).min(8);
-            save_state(cfg, settings, &themes[theme_idx].name, mode, persist);
+            save_state(cfg, settings, mode, persist);
             return Ok(LoopAction::Skip);
         }
         render::Action::None => {}
@@ -579,8 +590,8 @@ fn main() -> Result<()> {
 
     // Load config, then let CLI args override
     let mut cfg = config::load();
-    // In-app changes only overwrite the config when explicitly opted in,
-    // either via --save for this session or save_settings = true in the file.
+    // Non-theme changes only overwrite the config when explicitly opted in.
+    // Theme picker changes are always session-only.
     let persist_settings = cli.save || cfg.save_settings;
     if let Some(ref m) = cli.mode {
         cfg.mode = m.clone();
@@ -650,11 +661,11 @@ fn main() -> Result<()> {
     let frame_duration = Duration::from_millis(1000 / fps);
     let low_freq = cfg.low_freq;
     let high_freq = cfg.high_freq;
-    let themes = theme::load_themes();
+    let mut themes = theme::load_themes(&cfg.theme_catalog, &cfg.theme);
     if themes.is_empty() {
-        anyhow::bail!("No embedded, shared, or Specterm-specific themes could be loaded");
+        themes.push(theme::fallback_theme());
     }
-    let mut theme_idx = themes.iter().position(|t| t.name == cfg.theme).unwrap_or(0);
+    let mut theme_idx = themes.iter().position(|t| t.path == cfg.theme).unwrap_or(0);
 
     let mut settings = render::Settings {
         smoothing: cfg.smoothing.clamp(0.0, 0.99),
@@ -846,4 +857,30 @@ fn main() -> Result<()> {
 
     render::cleanup(&mut terminal)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn theme_selection_does_not_change_or_rewrite_config() {
+        let mut cfg = config::Config::default();
+        cfg.theme = "~/.config/themes/configured.toml".to_string();
+        let settings = render::Settings {
+            smoothing: cfg.smoothing,
+            monstercat: cfg.monstercat,
+            noise_floor: cfg.noise_floor,
+            theme_idx: 7,
+            gradient_by_position: cfg.gradient_by_position,
+            bar_width: cfg.bar_width,
+            bar_spacing: cfg.bar_spacing,
+            sensitivity: cfg.sensitivity,
+            eq: cfg.eq.clone(),
+        };
+
+        assert!(!runtime_settings_changed(&cfg, &settings, &Mode::Spectrum));
+        save_state(&mut cfg, &settings, &Mode::Spectrum, false);
+        assert_eq!(cfg.theme, "~/.config/themes/configured.toml");
+    }
 }
