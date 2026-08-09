@@ -21,6 +21,26 @@ var globalWatchdog: DispatchSourceTimer?
 var globalSleepObs: NSObjectProtocol?
 
 @available(macOS 13.0, *)
+func stopCaptureBeforeSleep(timeout: TimeInterval = 10) {
+    guard let stream = globalStream else { return }
+
+    let stopped = DispatchSemaphore(value: 0)
+    stream.stopCapture { error in
+        if let error {
+            log("failed to stop stream before sleep: \(error.localizedDescription)")
+        }
+        stopped.signal()
+    }
+
+    if stopped.wait(timeout: .now() + timeout) == .timedOut {
+        log("timed out waiting for stream to stop before sleep")
+    }
+
+    globalStream = nil
+    globalTap = nil
+}
+
+@available(macOS 13.0, *)
 class AudioTap: NSObject, SCStreamOutput, SCStreamDelegate {
     let outputHandle = FileHandle.standardOutput
     let monoMode: Bool
@@ -251,11 +271,9 @@ func setup() async throws {
         queue: .main
     ) { _ in
         log("system will sleep, stopping specterm...")
+        stopCaptureBeforeSleep()
         kill(parentPid, SIGTERM)
-        Task {
-            try? await globalStream?.stopCapture()
-            exit(0)
-        }
+        exit(0)
     }
 
     // Watchdog: exit if parent process dies (reparented to launchd, ppid == 1).
