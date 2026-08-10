@@ -865,8 +865,10 @@ mod tests {
 
     #[test]
     fn theme_selection_does_not_change_or_rewrite_config() {
-        let mut cfg = config::Config::default();
-        cfg.theme = "~/.config/themes/configured.toml".to_string();
+        let mut cfg = config::Config {
+            theme: "~/.config/themes/configured.toml".to_string(),
+            ..config::Config::default()
+        };
         let settings = render::Settings {
             smoothing: cfg.smoothing,
             monstercat: cfg.monstercat,

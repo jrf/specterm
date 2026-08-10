@@ -3,6 +3,7 @@ import ScreenCaptureKit
 import CoreMedia
 import AVFoundation
 import AppKit
+import SpectermTapCore
 
 // specterm-tap: Captures system audio via ScreenCaptureKit and writes raw f32
 // PCM samples to stdout (native endian). Sends interleaved stereo (L, R, L, R...)
@@ -186,13 +187,7 @@ class AudioTap: NSObject, SCStreamOutput, SCStreamDelegate {
 @available(macOS 13.0, *)
 func setup() async throws {
     let args = CommandLine.arguments
-    let sampleRate: Double = {
-        if let idx = args.firstIndex(of: "--sample-rate"), idx + 1 < args.count,
-           let rate = Double(args[idx + 1]) {
-            return rate
-        }
-        return 48000.0
-    }()
+    let sampleRate = sampleRate(from: args)
 
     log("starting capture (sample rate: \(Int(sampleRate)))")
 
