@@ -95,6 +95,7 @@ impl Drop for CaptureHandle {
 /// Send SIGTERM to the tap and wait briefly for it to exit cleanly so
 /// ScreenCaptureKit can stop the stream (clears the macOS screen-recording
 /// indicator). Falls back to SIGKILL if it doesn't exit in time.
+#[cfg_attr(test, allow(dead_code))]
 fn shutdown_tap(child: &mut Child) {
     #[cfg(unix)]
     unsafe {
@@ -152,10 +153,12 @@ pub fn start_capture(
             let mb = mono_buf.clone();
             let st = (stereo.0.clone(), stereo.1.clone());
             let lw = lw.clone();
+            let mut scratch = Scratch::new();
             device.build_input_stream(
                 &config.into(),
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                    write_samples(&mb, &st, data, channels, &lw);
+                    scratch.fill(data.iter().copied(), channels);
+                    scratch.flush(&mb, &st, &lw);
                 },
                 err_fn,
                 None,
@@ -165,11 +168,12 @@ pub fn start_capture(
             let mb = mono_buf.clone();
             let st = (stereo.0.clone(), stereo.1.clone());
             let lw = lw.clone();
+            let mut scratch = Scratch::new();
             device.build_input_stream(
                 &config.into(),
                 move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                    let floats: Vec<f32> = data.iter().map(|&s| s as f32 / 32768.0).collect();
-                    write_samples(&mb, &st, &floats, channels, &lw);
+                    scratch.fill(data.iter().map(|&s| s as f32 / 32768.0), channels);
+                    scratch.flush(&mb, &st, &lw);
                 },
                 err_fn,
                 None,
@@ -179,14 +183,16 @@ pub fn start_capture(
             let mb = mono_buf.clone();
             let st = (stereo.0.clone(), stereo.1.clone());
             let lw = lw.clone();
+            let mut scratch = Scratch::new();
             device.build_input_stream(
                 &config.into(),
                 move |data: &[u16], _: &cpal::InputCallbackInfo| {
-                    let floats: Vec<f32> = data
-                        .iter()
-                        .map(|&s| (s as f32 / u16::MAX as f32) * 2.0 - 1.0)
-                        .collect();
-                    write_samples(&mb, &st, &floats, channels, &lw);
+                    scratch.fill(
+                        data.iter()
+                            .map(|&s| (s as f32 / u16::MAX as f32) * 2.0 - 1.0),
+                        channels,
+                    );
+                    scratch.flush(&mb, &st, &lw);
                 },
                 err_fn,
                 None,
@@ -228,34 +234,23 @@ pub fn start_tap(
     let lw = last_write.clone_inner();
     thread::spawn(move || {
         let mut read_buf = [0u8; 4096];
+        let mut scratch = Scratch::new();
         loop {
             match stdout.read(&mut read_buf) {
                 Ok(0) => break,
                 Ok(n) => {
                     // Align to 8 bytes (one stereo frame = 2 × f32 = 8 bytes)
                     let sample_bytes = &read_buf[..n - (n % 8)];
-                    let samples: Vec<f32> = sample_bytes
-                        .chunks_exact(4)
-                        .map(|chunk| f32::from_ne_bytes(chunk.try_into().unwrap()))
-                        .collect();
-
-                    if samples.len() >= 2 {
-                        let mut mono = Vec::with_capacity(samples.len() / 2);
-                        let mut left = Vec::with_capacity(samples.len() / 2);
-                        let mut right = Vec::with_capacity(samples.len() / 2);
-
-                        for frame in samples.chunks_exact(2) {
-                            let l = frame[0];
-                            let r = frame[1];
-                            mono.push((l + r) / 2.0);
-                            left.push(l);
-                            right.push(r);
-                        }
-
-                        write_to_buffer(&mono_buf, &mono, &lw);
-                        write_to_buffer(&stereo.0, &left, &lw);
-                        write_to_buffer(&stereo.1, &right, &lw);
+                    if sample_bytes.is_empty() {
+                        continue;
                     }
+                    scratch.fill(
+                        sample_bytes
+                            .chunks_exact(4)
+                            .map(|chunk| f32::from_ne_bytes(chunk.try_into().unwrap())),
+                        2,
+                    );
+                    scratch.flush(&mono_buf, &stereo, &lw);
                 }
                 Err(_) => break,
             }
@@ -284,8 +279,12 @@ fn find_tap_binary() -> String {
     "specterm-tap".to_string()
 }
 
-/// Write samples into a single ring buffer and update the write timestamp.
-fn write_to_buffer(buffer: &SampleBuffer, samples: &[f32], last_write: &Mutex<Instant>) {
+/// Append `samples` to the tail of a fixed-capacity ring buffer, dropping the
+/// oldest samples. Does not touch the write timestamp.
+fn write_to_buffer(buffer: &SampleBuffer, samples: &[f32]) {
+    if samples.is_empty() {
+        return;
+    }
     let mut buf = buffer.lock().unwrap();
     let capacity = buf.len();
     let new_len = samples.len();
@@ -296,33 +295,69 @@ fn write_to_buffer(buffer: &SampleBuffer, samples: &[f32], last_write: &Mutex<In
         buf.rotate_left(new_len);
         buf[capacity - new_len..].copy_from_slice(samples);
     }
-
-    *last_write.lock().unwrap() = Instant::now();
 }
 
-/// Write incoming interleaved samples: mono-mix to mono_buf, split L/R to stereo.
-fn write_samples(
-    mono_buf: &SampleBuffer,
-    stereo: &StereoPair,
-    data: &[f32],
-    channels: usize,
-    last_write: &Mutex<Instant>,
-) {
-    let mut mono = Vec::with_capacity(data.len() / channels);
-    let mut left = Vec::with_capacity(data.len() / channels);
-    let mut right = Vec::with_capacity(data.len() / channels);
+/// Reusable de-interleave scratch space owned by a capture thread.
+///
+/// Audio callbacks run on a realtime thread, so we avoid allocating there:
+/// the vectors grow to the callback size once and are reused afterwards.
+struct Scratch {
+    mono: Vec<f32>,
+    left: Vec<f32>,
+    right: Vec<f32>,
+}
 
-    for frame in data.chunks(channels) {
-        let l = frame[0];
-        let r = if channels > 1 { frame[1] } else { l };
-        mono.push((l + r) / 2.0);
-        left.push(l);
-        right.push(r);
+impl Scratch {
+    fn new() -> Self {
+        Self {
+            mono: Vec::new(),
+            left: Vec::new(),
+            right: Vec::new(),
+        }
     }
 
-    write_to_buffer(mono_buf, &mono, last_write);
-    write_to_buffer(&stereo.0, &left, last_write);
-    write_to_buffer(&stereo.1, &right, last_write);
+    /// De-interleave `samples` (with `channels` samples per frame) into
+    /// mono-mix, left, and right. Channels beyond the second are ignored;
+    /// mono input is duplicated to both sides. A trailing partial frame is dropped.
+    fn fill<I: Iterator<Item = f32>>(&mut self, samples: I, channels: usize) {
+        self.mono.clear();
+        self.left.clear();
+        self.right.clear();
+        let channels = channels.max(1);
+
+        let mut idx = 0;
+        let mut l = 0.0;
+        let mut r = 0.0;
+        for s in samples {
+            match idx {
+                0 => l = s,
+                1 => r = s,
+                _ => {}
+            }
+            idx += 1;
+            if idx == channels {
+                if channels == 1 {
+                    r = l;
+                }
+                self.mono.push((l + r) / 2.0);
+                self.left.push(l);
+                self.right.push(r);
+                idx = 0;
+            }
+        }
+    }
+
+    /// Push the de-interleaved samples into the shared ring buffers and stamp
+    /// the write time once.
+    fn flush(&self, mono_buf: &SampleBuffer, stereo: &StereoPair, last_write: &Mutex<Instant>) {
+        if self.mono.is_empty() {
+            return;
+        }
+        write_to_buffer(mono_buf, &self.mono);
+        write_to_buffer(&stereo.0, &self.left);
+        write_to_buffer(&stereo.1, &self.right);
+        *last_write.lock().unwrap() = Instant::now();
+    }
 }
 
 /// List available input device names.
@@ -401,5 +436,69 @@ fn query_now_playing() -> Option<String> {
         None
     } else {
         Some(text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn contents(buf: &SampleBuffer) -> Vec<f32> {
+        buf.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn ring_buffer_appends_and_drops_oldest() {
+        let buf = new_buffer(4);
+        write_to_buffer(&buf, &[1.0, 2.0]);
+        assert_eq!(contents(&buf), vec![0.0, 0.0, 1.0, 2.0]);
+        write_to_buffer(&buf, &[3.0, 4.0, 5.0]);
+        assert_eq!(contents(&buf), vec![2.0, 3.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn ring_buffer_keeps_tail_when_input_exceeds_capacity() {
+        let buf = new_buffer(3);
+        write_to_buffer(&buf, &[1.0, 2.0, 3.0, 4.0, 5.0]);
+        assert_eq!(contents(&buf), vec![3.0, 4.0, 5.0]);
+        write_to_buffer(&buf, &[]);
+        assert_eq!(contents(&buf), vec![3.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn scratch_deinterleaves_stereo() {
+        let mut s = Scratch::new();
+        s.fill([1.0, -1.0, 0.5, 0.5].into_iter(), 2);
+        assert_eq!(s.left, vec![1.0, 0.5]);
+        assert_eq!(s.right, vec![-1.0, 0.5]);
+        assert_eq!(s.mono, vec![0.0, 0.5]);
+    }
+
+    #[test]
+    fn scratch_duplicates_mono_and_ignores_extra_channels() {
+        let mut s = Scratch::new();
+        s.fill([0.2, 0.4].into_iter(), 1);
+        assert_eq!(s.left, vec![0.2, 0.4]);
+        assert_eq!(s.right, vec![0.2, 0.4]);
+        assert_eq!(s.mono, vec![0.2, 0.4]);
+
+        // 4-channel input: only first two channels used; trailing partial frame dropped.
+        s.fill([1.0, 2.0, 9.0, 9.0, 3.0, 4.0, 9.0, 9.0, 5.0].into_iter(), 4);
+        assert_eq!(s.left, vec![1.0, 3.0]);
+        assert_eq!(s.right, vec![2.0, 4.0]);
+    }
+
+    #[test]
+    fn scratch_flush_writes_all_buffers_and_stamps_time() {
+        let mono = new_buffer(2);
+        let stereo = new_stereo_buffers(2);
+        let lw = Mutex::new(Instant::now() - std::time::Duration::from_secs(10));
+        let mut s = Scratch::new();
+        s.fill([1.0, 3.0].into_iter(), 2);
+        s.flush(&mono, &stereo, &lw);
+        assert_eq!(contents(&mono), vec![0.0, 2.0]);
+        assert_eq!(contents(&stereo.0), vec![0.0, 1.0]);
+        assert_eq!(contents(&stereo.1), vec![0.0, 3.0]);
+        assert!(lw.lock().unwrap().elapsed().as_secs() < 5);
     }
 }

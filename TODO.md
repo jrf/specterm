@@ -1,12 +1,13 @@
 # specterm — TODO
 
 ## Now
-- [ ] Clean tap shutdown on sleep — tap subscribes to `NSWorkspaceWillSleepNotification` so replayd sees a clean SCStream disconnect instead of a zombie client across sleep/wake #bug
+- [ ] Config validation in one place — `low_freq < high_freq <= sample_rate/2` is never checked; clamps for fps/smoothing/bar_width are scattered across `main.rs` #bug
 
 ## Next
-- [ ] Auto-sensitivity cap — `sens` grows unbounded for quiet audio (1% per frame compounds to 392x in 10s); add a max cap and possibly raise default `noise_floor` above 0.0 #bug
-- [ ] Equalizer curve tuning — current `ln(freq/low_freq)+1.0` may over/under-boost; needs listening tests #improvement
+- [ ] Consider raising default `noise_floor` above 0.0 for quiet-room mic input #improvement
+- [ ] Equalizer curve tuning — current `freq_hi^0.85 / log2(FFT_SIZE)` may over/under-boost; needs listening tests #improvement
 - [ ] FPS / latency debug overlay (`--debug` flag) #feature
+- [ ] Lock-free SPSC ring buffer for audio capture (replace `Arc<Mutex<Vec>>` + `rotate_left`) #improvement
 
 ## Later
 - [ ] Peak hold indicators on spectrum bars #feature
@@ -17,6 +18,8 @@
 - Braille rendering — block elements (▁▂▃▄▅▆▇█) give 8 subdivisions per cell vs braille's 4 vertically. Only would help wave/scope modes.
 
 ## Done
+- [x] Clean tap shutdown on sleep — tap subscribes to `NSWorkspace.willSleepNotification` so replayd sees a clean SCStream disconnect instead of a zombie client across sleep/wake #bug
+- [x] Auto-sensitivity cap — `sens` is clamped to `MAX_SENS` in `AutoSensitivity::adjust` #bug
 - [x] Fix stereo L/R separation — tap now reads full AudioBufferList so planar SCK audio isn't collapsed to channel 0 only #bug
 - [x] Auto-restart wedged capture stream (heals stuck screen-recording indicator after sleep/wake) #bug
 - [x] Core audio capture and spectrum rendering with FFT pipeline #feature

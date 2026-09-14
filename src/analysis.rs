@@ -331,8 +331,8 @@ impl AutoSensitivity {
         }
 
         if max_bar > 1.0 {
-            // Proportional attack: if bars overshoot by 5×, cut sens by 5×.
-            // Blend with a minimum 2% cut so mild overshoots still converge.
+            // Cut sens by at least 2%/frame (framerate-scaled); for small
+            // overshoots (< ~2%) cut exactly enough to bring max_bar to 1.0.
             let reduction = (1.0 / max_bar).max(0.98_f32.powf(time_scale));
             self.sens *= reduction;
             self.sens_init = false;
@@ -354,5 +354,284 @@ impl AutoSensitivity {
         if self.sens > MAX_SENS {
             self.sens = MAX_SENS;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SR: u32 = 48_000;
+
+    fn sine(freq: f32, sr: u32, n: usize) -> Vec<f32> {
+        (0..n)
+            .map(|i| (2.0 * std::f32::consts::PI * freq * i as f32 / sr as f32).sin())
+            .collect()
+    }
+
+    #[test]
+    fn spectrum_peaks_at_input_frequency() {
+        let analyzer = SpectrumAnalyzer::new();
+        let freq = 1000.0;
+        let mags = analyzer.spectrum(&sine(freq, SR, FFT_SIZE));
+        assert_eq!(mags.len(), FFT_SIZE / 2);
+
+        let peak_bin = mags
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .map(|(i, _)| i)
+            .unwrap();
+        let expected_bin = (freq * FFT_SIZE as f32 / SR as f32).round() as usize;
+        assert!(
+            (peak_bin as i64 - expected_bin as i64).abs() <= 1,
+            "peak at bin {peak_bin}, expected ~{expected_bin}"
+        );
+    }
+
+    #[test]
+    fn spectrum_zero_pads_short_input_and_is_silent_for_zeros() {
+        let analyzer = SpectrumAnalyzer::new();
+        let mags = analyzer.spectrum(&[0.0; 100]);
+        assert_eq!(mags.len(), FFT_SIZE / 2);
+        assert!(mags.iter().all(|&m| m == 0.0));
+    }
+
+    #[test]
+    fn bin_layout_ranges_are_monotonic_and_non_overlapping() {
+        for n in [1usize, 8, 64, 200, 400] {
+            let layout = BinLayout::new(n, SR, 50.0, 10_000.0);
+            assert_eq!(layout.ranges.len(), n);
+            let mut prev_hi = 0;
+            for (i, &(lo, hi, eq)) in layout.ranges.iter().enumerate() {
+                assert!(lo < hi, "n={n} bar {i}: lo {lo} >= hi {hi}");
+                assert!(hi <= FFT_SIZE / 2, "n={n} bar {i}: hi {hi} beyond nyquist");
+                assert!(
+                    lo >= prev_hi,
+                    "n={n} bar {i}: lo {lo} overlaps prev hi {prev_hi}"
+                );
+                assert!(eq.is_finite() && eq > 0.0);
+                prev_hi = hi;
+            }
+        }
+    }
+
+    #[test]
+    fn bin_layout_zero_bars_is_empty() {
+        let layout = BinLayout::new(0, SR, 50.0, 10_000.0);
+        assert!(layout.ranges.is_empty());
+        assert!(layout.apply(&[1.0; FFT_SIZE / 2]).is_empty());
+    }
+
+    #[test]
+    fn bin_layout_clamps_high_freq_to_nyquist() {
+        let layout = BinLayout::new(32, SR, 50.0, 1_000_000.0);
+        let last = layout.ranges.last().unwrap();
+        // Top bar must end at (or one bin shy of, due to float truncation) nyquist.
+        assert!(last.1 >= FFT_SIZE / 2 - 1 && last.1 <= FFT_SIZE / 2);
+    }
+
+    #[test]
+    fn bin_layout_apply_routes_tone_to_expected_bar() {
+        let analyzer = SpectrumAnalyzer::new();
+        let n = 32;
+        let layout = BinLayout::new(n, SR, 50.0, 10_000.0);
+        let mags = analyzer.spectrum(&sine(2000.0, SR, FFT_SIZE));
+        let bars = layout.apply(&mags);
+        assert_eq!(bars.len(), n);
+
+        let hot = bars
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .map(|(i, _)| i)
+            .unwrap();
+        // 2 kHz lies in the bar whose bin range covers bin 2000/11.71 ≈ 171.
+        let bin_2k = (2000.0 * FFT_SIZE as f32 / SR as f32) as usize;
+        let expected = layout
+            .ranges
+            .iter()
+            .position(|&(lo, hi, _)| lo <= bin_2k && bin_2k < hi)
+            .unwrap();
+        assert_eq!(hot, expected);
+    }
+
+    #[test]
+    fn apply_eq_interpolates_between_bands() {
+        let mut bars = vec![1.0; 5];
+        apply_eq(&mut bars, &[0.0, 2.0]);
+        assert_eq!(bars, vec![0.0, 0.5, 1.0, 1.5, 2.0]);
+
+        let mut bars = vec![1.0; 3];
+        apply_eq(&mut bars, &[3.0]);
+        assert_eq!(bars, vec![3.0; 3]);
+
+        let mut bars = vec![1.0; 3];
+        apply_eq(&mut bars, &[]);
+        assert_eq!(bars, vec![1.0; 3]);
+    }
+
+    #[test]
+    fn smooth_initializes_memory_then_accumulates() {
+        let mut mem = Vec::new();
+        let mut bars = vec![1.0, 2.0];
+        smooth(&mut mem, &mut bars, 0.5, 60.0);
+        // First call with mismatched memory only seeds it.
+        assert_eq!(bars, vec![1.0, 2.0]);
+        assert_eq!(mem, vec![1.0, 2.0]);
+
+        let mut bars = vec![1.0, 2.0];
+        smooth(&mut mem, &mut bars, 0.5, 60.0);
+        assert_eq!(bars, vec![1.5, 3.0]);
+        assert_eq!(mem, bars);
+    }
+
+    #[test]
+    fn smooth_is_framerate_independent_over_one_second() {
+        // Feed a constant 1.0 for one wall-clock second at 60fps vs 30fps.
+        let run = |fps: usize| {
+            let mut mem = vec![0.0];
+            let mut bars = vec![0.0];
+            for _ in 0..fps {
+                bars = vec![1.0];
+                smooth(&mut mem, &mut bars, 0.3, fps as f32);
+            }
+            bars[0]
+        };
+        let a = run(60);
+        let b = run(30);
+        // Both converge to the geometric-series limit 1/(1-alpha) for their alpha
+        // (alpha = 0.3 at 60fps, 0.09 at 30fps): higher fps => more memory.
+        let lim60 = 1.0 / (1.0 - 0.3_f32);
+        let lim30 = 1.0 / (1.0 - 0.3_f32.powf(2.0));
+        assert!(
+            (a - lim60).abs() < 1e-3,
+            "60fps steady state {a}, limit {lim60}"
+        );
+        assert!(
+            (b - lim30).abs() < 1e-3,
+            "30fps steady state {b}, limit {lim30}"
+        );
+        assert!(a > b);
+    }
+
+    #[test]
+    fn gravity_snaps_up_and_falls_parabolically_to_zero() {
+        let mut g = Gravity::new();
+        let mut bars = vec![0.8];
+        g.apply(&mut bars, 60.0, 0.3);
+        assert_eq!(bars, vec![0.8]);
+
+        let mut prev = 0.8;
+        let mut reached_zero = false;
+        for _ in 0..200 {
+            let mut bars = vec![0.0];
+            g.apply(&mut bars, 60.0, 0.3);
+            assert!(bars[0] <= prev, "bar rose while input was zero");
+            assert!(bars[0] >= 0.0);
+            prev = bars[0];
+            if bars[0] == 0.0 {
+                reached_zero = true;
+                break;
+            }
+        }
+        assert!(reached_zero, "gravity never decayed to zero");
+    }
+
+    #[test]
+    fn gravity_resizes_state_when_bar_count_changes() {
+        let mut g = Gravity::new();
+        g.apply(&mut [1.0; 4], 60.0, 0.3);
+        let mut bars = vec![0.5; 8];
+        g.apply(&mut bars, 60.0, 0.3);
+        assert_eq!(bars, vec![0.5; 8]);
+    }
+
+    #[test]
+    fn monstercat_spreads_energy_with_distance_falloff() {
+        let mut bars = vec![0.0, 0.0, 1.0, 0.0, 0.0];
+        monstercat(&mut bars, 1.0);
+        let base = 1.5_f32;
+        assert_eq!(bars[2], 1.0);
+        assert!((bars[1] - 1.0 / base).abs() < 1e-6);
+        assert!((bars[3] - 1.0 / base).abs() < 1e-6);
+        assert!((bars[0] - 1.0 / base.powi(2)).abs() < 1e-6);
+        assert!(bars[1] > bars[0]);
+
+        // Never lowers an existing bar.
+        let mut bars = vec![0.9, 1.0];
+        monstercat(&mut bars, 1.0);
+        assert_eq!(bars, vec![0.9, 1.0]);
+
+        let mut single = vec![0.3];
+        monstercat(&mut single, 1.0);
+        assert_eq!(single, vec![0.3]);
+    }
+
+    #[test]
+    fn noise_gate_zeroes_below_floor() {
+        let mut bars = vec![0.001, 0.01, 0.1];
+        noise_gate(&mut bars, 0.01);
+        assert_eq!(bars, vec![0.0, 0.01, 0.1]);
+    }
+
+    #[test]
+    fn autosens_cuts_on_overshoot_and_clamps_bars() {
+        let mut a = AutoSensitivity::new();
+        let mut bars = vec![5.0, 0.5];
+        a.adjust(&mut bars, 60.0, false);
+        assert_eq!(bars, vec![1.0, 0.5]);
+        // Large overshoot: floor of 2% cut per frame at 60fps.
+        assert!((a.sens - 0.98).abs() < 1e-6, "sens {}", a.sens);
+
+        // Tiny overshoot (1%): exact proportional cut instead.
+        let mut a = AutoSensitivity::new();
+        a.adjust(&mut [1.01], 60.0, false);
+        assert!((a.sens - 1.0 / 1.01).abs() < 1e-6, "sens {}", a.sens);
+
+        // Overshoot ends the initial fast ramp.
+        a.adjust(&mut [0.5], 60.0, false);
+        assert!(
+            (a.sens - (1.0 / 1.01) * 1.01).abs() < 1e-5,
+            "sens {}",
+            a.sens
+        );
+    }
+
+    #[test]
+    fn autosens_grows_when_under_and_holds_on_silence() {
+        let mut a = AutoSensitivity::new();
+        a.adjust(&mut [0.5], 60.0, false);
+        // Initial ramp: 1.01 * 1.1
+        assert!((a.sens - 1.111).abs() < 1e-4, "sens {}", a.sens);
+
+        let before = a.sens;
+        a.adjust(&mut [0.0], 60.0, true);
+        assert_eq!(a.sens, before, "sens changed during silence");
+    }
+
+    #[test]
+    fn autosens_is_capped() {
+        let mut a = AutoSensitivity::new();
+        for _ in 0..10_000 {
+            a.adjust(&mut [0.001], 60.0, false);
+        }
+        assert!(a.sens <= 100.0);
+        assert!((a.sens - 100.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn autosens_converges_on_steady_input() {
+        let mut a = AutoSensitivity::new();
+        let raw = vec![0.05, 0.02];
+        for _ in 0..2_000 {
+            let mut bars = raw.clone();
+            a.scale(&mut bars);
+            a.adjust(&mut bars, 60.0, false);
+        }
+        let mut bars = raw.clone();
+        a.scale(&mut bars);
+        let max = bars.iter().cloned().fold(0.0, f32::max);
+        assert!(max > 0.9 && max <= 1.05, "steady-state max bar {max}");
     }
 }
