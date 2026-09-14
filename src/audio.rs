@@ -94,15 +94,23 @@ impl Drop for CaptureHandle {
 
 /// Send SIGTERM to the tap and wait briefly for it to exit cleanly so
 /// ScreenCaptureKit can stop the stream (clears the macOS screen-recording
-/// indicator). Falls back to SIGKILL if it doesn't exit in time.
-#[cfg_attr(test, allow(dead_code))]
+/// indicator). Swift's stop deadline is 10 seconds; allow one extra second for
+/// its completion handler to exit before forcing termination.
 fn shutdown_tap(child: &mut Child) {
+    shutdown_tap_with_timeout(child, std::time::Duration::from_secs(11));
+}
+
+fn shutdown_tap_with_timeout(child: &mut Child, timeout: std::time::Duration) {
+    // Do not signal a PID that has already been reaped and could be reused.
+    if !matches!(child.try_wait(), Ok(None)) {
+        return;
+    }
     #[cfg(unix)]
     unsafe {
         libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
     }
 
-    let deadline = Instant::now() + std::time::Duration::from_millis(500);
+    let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         match child.try_wait() {
             Ok(Some(_)) => return,
@@ -216,10 +224,21 @@ pub fn start_tap(
 
     clear_buffers(&mono_buf, &stereo);
 
+    // Opt-in diagnostics without writing over the terminal UI.
+    let tap_stderr = match std::env::var_os("SPECTERM_TAP_LOG") {
+        Some(path) => Stdio::from(
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .with_context(|| format!("failed to open tap log {:?}", path))?,
+        ),
+        None => Stdio::null(),
+    };
     let mut child = Command::new(&tap_bin)
         .args(["--sample-rate", &sample_rate.to_string()])
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(tap_stderr)
         .spawn()
         .context(format!(
             "failed to start specterm-tap (looked for '{}'). \
@@ -442,6 +461,53 @@ fn query_now_playing() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn ready_child(script: &str) -> Child {
+        use std::io::BufRead;
+        let mut child = Command::new("sh")
+            .args(["-c", script])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert_eq!(line, "ready\n");
+        child
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tap_shutdown_allows_cleanup_longer_than_old_half_second_deadline() {
+        let mut child = ready_child(
+            "trap 'sleep 0.7; exit 0' TERM; printf 'ready\n'; while :; do sleep 0.05; done",
+        );
+        shutdown_tap(&mut child);
+        assert!(
+            child.wait().unwrap().success(),
+            "clean shutdown was interrupted"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tap_shutdown_kills_and_reaps_an_unresponsive_child() {
+        use std::os::unix::process::ExitStatusExt;
+        let mut child = ready_child("trap '' TERM; printf 'ready\n'; while :; do :; done");
+        shutdown_tap_with_timeout(&mut child, std::time::Duration::from_millis(30));
+        assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tap_shutdown_handles_an_already_reaped_child() {
+        let mut child = Command::new("true").spawn().unwrap();
+        assert!(child.wait().unwrap().success());
+        shutdown_tap(&mut child);
+        assert!(child.wait().unwrap().success());
+    }
 
     fn contents(buf: &SampleBuffer) -> Vec<f32> {
         buf.lock().unwrap().clone()

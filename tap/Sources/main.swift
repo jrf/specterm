@@ -21,31 +21,15 @@ var globalTermSrc: DispatchSourceSignal?
 var globalWatchdog: DispatchSourceTimer?
 var globalSleepObs: NSObjectProtocol?
 
-@available(macOS 13.0, *)
-func stopCaptureBeforeSleep(timeout: TimeInterval = 10) {
-    guard let stream = globalStream else { return }
-
-    let stopped = DispatchSemaphore(value: 0)
-    stream.stopCapture { error in
-        if let error {
-            log("failed to stop stream before sleep: \(error.localizedDescription)")
-        }
-        stopped.signal()
-    }
-
-    if stopped.wait(timeout: .now() + timeout) == .timedOut {
-        log("timed out waiting for stream to stop before sleep")
-    }
-
-    globalStream = nil
-    globalTap = nil
-}
+// Capture the original parent before asynchronous discovery/startup.
+let parentPid = getppid()
 
 @available(macOS 13.0, *)
 class AudioTap: NSObject, SCStreamOutput, SCStreamDelegate {
     let outputHandle = FileHandle.standardOutput
     let monoMode: Bool
     var samplesReceived: UInt64 = 0
+    var onCaptureError: (() -> Void)?
 
     init(mono: Bool = false) {
         self.monoMode = mono
@@ -114,7 +98,7 @@ class AudioTap: NSObject, SCStreamOutput, SCStreamDelegate {
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         log("stream stopped with error: \(error.localizedDescription)")
-        exit(1)
+        onCaptureError?()
     }
 
     /// Pull per-channel Float32 arrays from a CMSampleBuffer regardless of
@@ -223,19 +207,43 @@ func setup() async throws {
     globalTap = tap
     globalStream = stream
 
-    log("starting stream...")
-    try await stream.startCapture()
-    log("stream started, waiting for audio...")
+    let shutdown = ShutdownCoordinator(
+        readyToStop: false,
+        notifyParent: {
+            // Never signal launchd or a stale/reparented PID. In particular, do
+            // this even when a previous signal already requested shutdown.
+            if parentPid > 1 && getppid() == parentPid {
+                if kill(parentPid, SIGTERM) != 0 {
+                    log("failed to notify parent before sleep (errno: \(errno))")
+                }
+            }
+        },
+        stop: { done in stream.stopCapture(completionHandler: done) },
+        completion: { reason, outcome in
+            // Serialize cleanup/exit with the main-queue notification handlers.
+            DispatchQueue.main.async {
+                switch outcome {
+                case .stopped:
+                    log("stream stopped for shutdown")
+                case .failed(let error):
+                    log("failed to stop stream for shutdown: \(error.localizedDescription)")
+                case .timedOut:
+                    log("timed out waiting for stream shutdown after 10 seconds")
+                }
+                globalStream = nil
+                globalTap = nil
+                exit(reason == .captureError ? 1 : 0)
+            }
+        }
+    )
+    tap.onCaptureError = { shutdown.request(.captureError) }
 
     // Signal handlers on main queue
     let sigSrc = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
     signal(SIGINT, SIG_IGN)
     sigSrc.setEventHandler {
         log("received SIGINT, stopping...")
-        Task {
-            try? await globalStream?.stopCapture()
-            exit(0)
-        }
+        shutdown.request(.signal)
     }
     sigSrc.resume()
     globalSigSrc = sigSrc
@@ -244,48 +252,49 @@ func setup() async throws {
     signal(SIGTERM, SIG_IGN)
     termSrc.setEventHandler {
         log("received SIGTERM, stopping...")
-        Task {
-            try? await globalStream?.stopCapture()
-            exit(0)
-        }
+        shutdown.request(.signal)
     }
     termSrc.resume()
     globalTermSrc = termSrc
 
-    let parentPid = getppid()
-
-    // Shut down the entire application before sleep. replayd can otherwise hold
-    // a zombie SCStream reference across sleep/wake, stranding the
-    // screen-recording indicator and sending the daemon into a CPU-spin.
-    //
-    // Signal the parent before exiting so specterm's tap health checker cannot
-    // interpret our clean exit as a crash and respawn capture after wake.
+    // Notify Rust before waiting for capture to stop, so it cannot interpret
+    // our exit as a crash and respawn capture after wake. This notification does
+    // not hold the system awake; shutdown is best-effort with a bounded deadline.
     globalSleepObs = NSWorkspace.shared.notificationCenter.addObserver(
         forName: NSWorkspace.willSleepNotification,
         object: nil,
         queue: .main
     ) { _ in
         log("system will sleep, stopping specterm...")
-        stopCaptureBeforeSleep()
-        kill(parentPid, SIGTERM)
-        exit(0)
+        shutdown.request(.sleep)
     }
 
     // Watchdog: exit if parent process dies (reparented to launchd, ppid == 1).
     // This prevents orphaned tap processes after sleep/wake or unclean shutdown.
-    let watchdog = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+    let watchdog = DispatchSource.makeTimerSource(queue: .main)
     watchdog.schedule(deadline: .now() + 2, repeating: 2.0)
     watchdog.setEventHandler {
         if getppid() != parentPid {
             log("parent process died, stopping...")
-            Task {
-                try? await globalStream?.stopCapture()
-                exit(0)
-            }
+            shutdown.request(.parentExited)
         }
     }
     watchdog.resume()
     globalWatchdog = watchdog
+
+    // Handlers are installed before awaiting startCapture. If shutdown arrives
+    // during startup, defer stop until start returns but start the 10s deadline
+    // immediately. Discovery/addStreamOutput above still precede these handlers;
+    // no capture has started in that early startup window.
+    log("starting stream...")
+    do {
+        try await stream.startCapture()
+        log("stream started, waiting for audio...")
+    } catch {
+        log("failed to start stream: \(error.localizedDescription)")
+        shutdown.request(.captureError)
+    }
+    shutdown.allowStop()
 
     // setup() returns — dispatchMain() in the entry point keeps the process alive
 }

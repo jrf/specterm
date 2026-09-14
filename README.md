@@ -125,10 +125,31 @@ To visualize audio from Apple Music or other apps, specterm uses a companion Swi
 
 Select "System Audio (ScreenCaptureKit)" from the device menu (`d`), or pass `--device system`.
 
-Specterm shuts down its ScreenCaptureKit stream and exits before macOS sleeps,
-including clamshell sleep, so the capture service is not carried across a
-sleep/wake cycle. Closing the lid in external-display clamshell mode does not
-exit Specterm when macOS remains awake.
+On macOS's system-sleep notification, specterm-tap asks Specterm to exit before
+asynchronously stopping its ScreenCaptureKit stream. Capture is not intentionally
+restarted after wake. Stop requests share a 10-second deadline; Rust allows 11
+seconds before forcing termination. This is best-effort: the notification does
+not hold macOS awake, and a stop error or timeout does not confirm a clean service
+disconnect. Closing the lid in external-display clamshell mode does not exit
+Specterm when macOS remains awake. Specterm releases its own capture session;
+it does not terminate the macOS `replayd` service.
+
+To validate sleep shutdown on your Mac:
+
+1. Run `just install` to rebuild and install **both** binaries, then quit any old
+   Specterm session.
+2. Start a fresh session with helper diagnostics enabled:
+   `env SPECTERM_TAP_LOG=/tmp/specterm-tap.log specterm --device system`.
+   This appends helper stderr to that file without disrupting the TUI.
+3. Play audio, then choose Apple menu > Sleep. After waking, verify Specterm has
+   exited, the terminal's sharing indicator is gone (assuming no other capture
+   session), and the log contains `system will sleep, stopping specterm...` followed
+   by `stream stopped for shutdown`, rather than a stop error or timeout.
+4. Repeat with a lid-close that actually puts the Mac to sleep, and with the help
+   (`?`) or device (`d`) menu open. Verify capture does not restart after wake.
+
+Automated tests cover shutdown coordination and child-process termination, not
+macOS sleep delivery or `replayd` cleanup. The manual checks above remain necessary.
 
 **Alternative:** Install [BlackHole](https://github.com/ExistentialAudio/BlackHole), create a Multi-Output Device in Audio MIDI Setup (speakers + BlackHole), set it as your output, then select "BlackHole 2ch" as the input device.
 

@@ -20,6 +20,10 @@ extern "C" {
     fn signal(sig: std::ffi::c_int, handler: usize) -> usize;
 }
 
+pub(crate) fn shutdown_requested() -> bool {
+    SHUTDOWN.load(Ordering::Relaxed)
+}
+
 extern "C" fn shutdown_handler(_sig: std::ffi::c_int) {
     SHUTDOWN.store(true, Ordering::Relaxed);
 }
@@ -341,6 +345,10 @@ fn start_audio(
     device: Option<&str>,
     last_write: &audio::LastWriteTime,
 ) -> Result<(u32, audio::CaptureHandle)> {
+    anyhow::ensure!(
+        !shutdown_requested(),
+        "shutdown requested; capture will not restart"
+    );
     if device.is_none() || device == Some(audio::SYSTEM_AUDIO_LABEL) || device == Some("system") {
         audio::start_tap(
             mono_buf.clone(),
@@ -455,6 +463,9 @@ fn handle_normal_input(
             match render::device_menu(terminal, &devices, &themes[theme_idx])? {
                 render::DeviceMenuResult::Selected(new_device) => {
                     drop_capture(&mut audio.capture);
+                    if shutdown_requested() {
+                        return Ok(LoopAction::Quit);
+                    }
                     let (sr, handle) = start_audio(
                         &audio.mono_buf,
                         &audio.stereo,
@@ -522,6 +533,9 @@ fn drop_capture(capture: &mut audio::CaptureHandle) {
 
 /// Detect stale audio and silence, resetting state as needed.
 fn check_audio_health(vis: &mut VisualizerState, audio: &mut AudioState) {
+    if shutdown_requested() {
+        return;
+    }
     // Zero buffers if no new samples recently
     if audio.last_write.elapsed() > STALE_AUDIO_THRESHOLD {
         audio.mono_buf.lock().unwrap().fill(0.0);
@@ -540,6 +554,10 @@ fn check_audio_health(vis: &mut VisualizerState, audio: &mut AudioState) {
         if should_restart {
             audio.last_restart_attempt = Some(Instant::now());
             drop_capture(&mut audio.capture);
+            // Sleep may have been announced while waiting for the old tap.
+            if shutdown_requested() {
+                return;
+            }
             match start_audio(
                 &audio.mono_buf,
                 &audio.stereo,
@@ -693,7 +711,7 @@ fn main() -> Result<()> {
     let mut settings_state: Option<render::SettingsState> = None;
 
     loop {
-        if SHUTDOWN.load(Ordering::Relaxed) {
+        if shutdown_requested() {
             break;
         }
 

@@ -107,6 +107,9 @@ pub fn device_menu(
     let total = devices.len() + 1;
 
     loop {
+        if crate::shutdown_requested() {
+            return Ok(DeviceMenuResult::Quit);
+        }
         terminal.draw(|frame| {
             let area = frame.area();
 
@@ -538,8 +541,11 @@ pub fn help(terminal: &mut Term, theme: &Theme) -> Result<()> {
         frame.render_widget(paragraph, area);
     })?;
 
-    // Wait for any key press
+    // Wait for any key press, but never trap a shutdown in the modal.
     loop {
+        if crate::shutdown_requested() {
+            return Ok(());
+        }
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(_) = event::read()? {
                 return Ok(());
