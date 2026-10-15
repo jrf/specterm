@@ -164,14 +164,18 @@ pub fn apply_eq(bars: &mut [f32], eq_gains: &[f32]) {
     }
 }
 
-/// Integral smoothing: additive memory accumulation.
+/// Temporal smoothing: exponential moving average.
 ///
-/// Each frame: `out = mem * alpha + current`, then `mem = out`.
+/// Each frame: `out = mem * alpha + current * (1 - alpha)`, then `mem = out`.
 /// `noise_reduction` is 0.0–1.0. Higher = more memory = smoother.
-/// `alpha` is `noise_reduction^(60/fps)` for framerate-independent decay.
+/// `alpha` is `noise_reduction^(60/fps)`, so the response time is the same in
+/// wall-clock time at any framerate.
 ///
-/// Energy accumulates via the integral, and auto-sensitivity normalizes it
-/// back by adjusting the gain multiplier.
+/// The weights sum to 1, so a steady input produces the same steady output at
+/// any framerate or smoothing setting. (The previous additive form,
+/// `out = mem * alpha + current`, amplified steady signals by `1/(1-alpha)`:
+/// 1.4× at 60fps but 2.5× at 144fps for the default 0.3, so brightness depended
+/// on framerate and flickered with frame-time jitter.)
 pub fn smooth(mem: &mut Vec<f32>, bars: &mut [f32], noise_reduction: f32, framerate: f32) {
     if mem.len() != bars.len() {
         *mem = bars.to_vec();
@@ -180,7 +184,7 @@ pub fn smooth(mem: &mut Vec<f32>, bars: &mut [f32], noise_reduction: f32, framer
     let alpha = noise_reduction.powf(60.0 / framerate);
 
     for (i, bar) in bars.iter_mut().enumerate() {
-        *bar += mem[i] * alpha;
+        *bar = mem[i] * alpha + *bar * (1.0 - alpha);
         mem[i] = *bar;
     }
 }
@@ -293,8 +297,8 @@ pub fn noise_gate(bars: &mut [f32], floor: f32) {
 /// scaled for framerate independence.
 ///
 /// Split into two phases:
-///   1. `scale()` — multiply bars by current sens (before gravity/integral)
-///   2. `adjust()` — clamp overshoots and update sens (after gravity/integral)
+///   1. `scale()` — multiply bars by current sens (before gravity/smoothing)
+///   2. `adjust()` — clamp overshoots and update sens (after gravity/smoothing)
 pub struct AutoSensitivity {
     pub sens: f32,
     sens_init: bool,
@@ -308,7 +312,7 @@ impl AutoSensitivity {
         }
     }
 
-    /// Phase 1: scale bars by current sensitivity. Call before gravity/integral.
+    /// Phase 1: scale bars by current sensitivity. Call before gravity/smoothing.
     pub fn scale(&self, bars: &mut [f32]) {
         for bar in bars.iter_mut() {
             *bar *= self.sens;
@@ -316,7 +320,7 @@ impl AutoSensitivity {
     }
 
     /// Phase 2: clamp overshoots and adjust sens for next frame.
-    /// Call after gravity and integral smoothing.
+    /// Call after gravity and smoothing.
     ///
     /// Per-frame factors use `base^(60/fps)` so the per-second rate is
     /// constant regardless of framerate.
@@ -480,7 +484,7 @@ mod tests {
     }
 
     #[test]
-    fn smooth_initializes_memory_then_accumulates() {
+    fn smooth_initializes_memory_then_averages() {
         let mut mem = Vec::new();
         let mut bars = vec![1.0, 2.0];
         smooth(&mut mem, &mut bars, 0.5, 60.0);
@@ -488,39 +492,76 @@ mod tests {
         assert_eq!(bars, vec![1.0, 2.0]);
         assert_eq!(mem, vec![1.0, 2.0]);
 
-        let mut bars = vec![1.0, 2.0];
+        // alpha = 0.5: halfway between memory (1, 2) and input (3, 0).
+        let mut bars = vec![3.0, 0.0];
         smooth(&mut mem, &mut bars, 0.5, 60.0);
-        assert_eq!(bars, vec![1.5, 3.0]);
+        assert_eq!(bars, vec![2.0, 1.0]);
         assert_eq!(mem, bars);
     }
 
     #[test]
-    fn smooth_is_framerate_independent_over_one_second() {
-        // Feed a constant 1.0 for one wall-clock second at 60fps vs 30fps.
-        let run = |fps: usize| {
-            let mut mem = vec![0.0];
-            let mut bars = vec![0.0];
-            for _ in 0..fps {
-                bars = vec![1.0];
-                smooth(&mut mem, &mut bars, 0.3, fps as f32);
+    fn smooth_steady_input_has_unity_gain_at_any_framerate() {
+        for nr in [0.0_f32, 0.3, 0.77, 0.99] {
+            for fps in [30.0_f32, 60.0, 144.0] {
+                let mut mem = vec![0.0];
+                let mut out = 0.0;
+                for _ in 0..(fps as usize * 600) {
+                    let mut bars = vec![0.5];
+                    smooth(&mut mem, &mut bars, nr, fps);
+                    out = bars[0];
+                }
+                assert!(
+                    (out - 0.5).abs() < 1e-3,
+                    "nr={nr} fps={fps}: steady output {out}, expected 0.5"
+                );
             }
-            bars[0]
+        }
+    }
+
+    #[test]
+    fn smooth_response_time_is_framerate_independent() {
+        // Time for a step from 0 to 1 to reach 90% should not depend on fps.
+        let t90 = |fps: f32| {
+            let mut mem = vec![0.0];
+            let mut k = 0;
+            loop {
+                let mut bars = vec![1.0];
+                smooth(&mut mem, &mut bars, 0.77, fps);
+                k += 1;
+                if bars[0] >= 0.9 {
+                    return k as f32 / fps;
+                }
+            }
         };
-        let a = run(60);
-        let b = run(30);
-        // Both converge to the geometric-series limit 1/(1-alpha) for their alpha
-        // (alpha = 0.3 at 60fps, 0.09 at 30fps): higher fps => more memory.
-        let lim60 = 1.0 / (1.0 - 0.3_f32);
-        let lim30 = 1.0 / (1.0 - 0.3_f32.powf(2.0));
+        let (a, b, c) = (t90(30.0), t90(60.0), t90(144.0));
+        // Discrete frames quantize the crossing to at most one frame (33 ms at 30fps).
         assert!(
-            (a - lim60).abs() < 1e-3,
-            "60fps steady state {a}, limit {lim60}"
+            (a - b).abs() <= 1.0 / 30.0 + 1e-6,
+            "30fps {a}s vs 60fps {b}s"
         );
         assert!(
-            (b - lim30).abs() < 1e-3,
-            "30fps steady state {b}, limit {lim30}"
+            (c - b).abs() <= 1.0 / 60.0 + 1e-6,
+            "144fps {c}s vs 60fps {b}s"
         );
-        assert!(a > b);
+    }
+
+    #[test]
+    fn smooth_does_not_flicker_with_frame_time_jitter() {
+        // Steady input, frame rate jittering 55–65 fps every frame.
+        let mut mem = vec![0.0];
+        let mut seed: u32 = 1;
+        let (mut lo, mut hi) = (f32::MAX, 0.0_f32);
+        for k in 0..2000 {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let fps = 55.0 + 10.0 * ((seed >> 8) as f32 / (1u32 << 24) as f32);
+            let mut bars = vec![0.5];
+            smooth(&mut mem, &mut bars, 0.3, fps);
+            if k > 1000 {
+                lo = lo.min(bars[0]);
+                hi = hi.max(bars[0]);
+            }
+        }
+        assert!(hi - lo < 1e-5, "steady output varied {lo}..{hi}");
     }
 
     #[test]

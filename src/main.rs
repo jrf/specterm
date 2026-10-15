@@ -233,7 +233,7 @@ impl VisualizerState {
 
     /// Run the DSP stages before auto-sensitivity adjustment on one channel:
     ///
-    /// noise_gate → sens·scale → gravity → integral
+    /// noise_gate → sens·scale → gravity → smoothing
     fn prepare_channel(
         mem: &mut Vec<f32>,
         raw_bars: &[f32],
@@ -257,7 +257,7 @@ impl VisualizerState {
         // Gravity (parabolic falloff)
         let noise_reduction = settings.smoothing;
         gravity.apply(&mut bars, framerate, noise_reduction);
-        // Integral smoothing (additive memory accumulation)
+        // Temporal smoothing (exponential moving average)
         analysis::smooth(mem, &mut bars, noise_reduction, framerate);
         bars
     }
