@@ -61,7 +61,10 @@ terminal width and the configured bar width and spacing.
 - **spectrum** — frequency bars with color gradient and gravity fall-off
 - **wave** — real-time waveform amplitude plot
 - **scope** — oscilloscope with zero-crossing trigger
-- **stereo** — left channel bars up, right channel bars down from center
+- **stereo** — left channel bars up, right channel bars down from center. Both
+  channels share one auto-sensitivity gain, so their relative level is preserved:
+  a quieter or panned channel shows shorter bars rather than being normalized to
+  full height.
 
 ## Themes
 

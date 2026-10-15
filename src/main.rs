@@ -157,8 +157,8 @@ struct VisualizerState {
     prev_left: Vec<f32>,
     prev_right: Vec<f32>,
     autosens: analysis::AutoSensitivity,
-    autosens_l: analysis::AutoSensitivity,
-    autosens_r: analysis::AutoSensitivity,
+    /// One gain shared by both stereo channels.
+    autosens_stereo: analysis::AutoSensitivity,
     gravity: analysis::Gravity,
     gravity_l: analysis::Gravity,
     gravity_r: analysis::Gravity,
@@ -178,8 +178,7 @@ impl VisualizerState {
             prev_left: vec![0.0; MIN_BARS],
             prev_right: vec![0.0; MIN_BARS],
             autosens: analysis::AutoSensitivity::new(),
-            autosens_l: analysis::AutoSensitivity::new(),
-            autosens_r: analysis::AutoSensitivity::new(),
+            autosens_stereo: analysis::AutoSensitivity::new(),
             gravity: analysis::Gravity::new(),
             gravity_l: analysis::Gravity::new(),
             gravity_r: analysis::Gravity::new(),
@@ -201,8 +200,7 @@ impl VisualizerState {
     /// Reset auto-sensitivity trackers (e.g. on device switch or silence).
     fn reset_sensitivity(&mut self) {
         self.autosens = analysis::AutoSensitivity::new();
-        self.autosens_l = analysis::AutoSensitivity::new();
-        self.autosens_r = analysis::AutoSensitivity::new();
+        self.autosens_stereo = analysis::AutoSensitivity::new();
     }
 
     /// Resize bar count if it differs from current, resetting buffers.
@@ -233,19 +231,18 @@ impl VisualizerState {
         }
     }
 
-    /// Run the shared DSP pipeline on a single channel:
+    /// Run the DSP stages before auto-sensitivity adjustment on one channel:
     ///
-    /// noise_gate → sens·scale → gravity → integral → overshoot+adjust → monstercat
-    fn process_channel(
+    /// noise_gate → sens·scale → gravity → integral
+    fn prepare_channel(
         mem: &mut Vec<f32>,
         raw_bars: &[f32],
         settings: &render::Settings,
         framerate: f32,
-        autosens: &mut analysis::AutoSensitivity,
+        autosens: &analysis::AutoSensitivity,
         gravity: &mut analysis::Gravity,
     ) -> Vec<f32> {
         let mut bars = raw_bars.to_vec();
-        let silence = bars.iter().all(|&b| b == 0.0);
         if settings.noise_floor > 0.0 {
             analysis::noise_gate(&mut bars, settings.noise_floor);
         }
@@ -262,13 +259,15 @@ impl VisualizerState {
         gravity.apply(&mut bars, framerate, noise_reduction);
         // Integral smoothing (additive memory accumulation)
         analysis::smooth(mem, &mut bars, noise_reduction, framerate);
-        // Phase 2: clamp overshoots and adjust sensitivity for next frame
-        autosens.adjust(&mut bars, framerate, silence);
+        bars
+    }
+
+    /// Final stage after auto-sensitivity has clamped the bars.
+    fn finish_channel(bars: &mut [f32], settings: &render::Settings) {
         // Monstercat runs after all other processing, on normalized bars
         if settings.monstercat {
-            analysis::monstercat(&mut bars, MONSTERCAT_PARAM);
+            analysis::monstercat(bars, MONSTERCAT_PARAM);
         }
-        bars
     }
 
     /// Process mono spectrum and return render-ready bars.
@@ -287,14 +286,19 @@ impl VisualizerState {
         let magnitudes = self.analyzer.spectrum(samples);
         let mut bars = self.bin_layout.as_ref().unwrap().apply(&magnitudes);
         analysis::apply_eq(&mut bars, eq_gains);
-        Self::process_channel(
+        let silence = bars.iter().all(|&b| b == 0.0);
+        let mut out = Self::prepare_channel(
             &mut self.prev_bars,
             &bars,
             settings,
             framerate,
-            &mut self.autosens,
+            &self.autosens,
             &mut self.gravity,
-        )
+        );
+        // Phase 2: clamp overshoots and adjust sensitivity for next frame
+        self.autosens.adjust(&mut out, framerate, silence);
+        Self::finish_channel(&mut out, settings);
+        out
     }
 
     /// Process stereo spectrum and return render-ready (left, right) bars.
@@ -319,22 +323,36 @@ impl VisualizerState {
         analysis::apply_eq(&mut left_bars, eq_gains);
         analysis::apply_eq(&mut right_bars, eq_gains);
 
-        let smooth_l = Self::process_channel(
+        // Silence only when both channels are silent; a hard-panned source
+        // must still drive the shared gain.
+        let silence = left_bars.iter().chain(&right_bars).all(|&b| b == 0.0);
+
+        // One gain for both channels preserves their relative level, so
+        // balance and panning stay visible instead of each side being
+        // independently normalized to full scale.
+        let mut smooth_l = Self::prepare_channel(
             &mut self.prev_left,
             &left_bars,
             settings,
             framerate,
-            &mut self.autosens_l,
+            &self.autosens_stereo,
             &mut self.gravity_l,
         );
-        let smooth_r = Self::process_channel(
+        let mut smooth_r = Self::prepare_channel(
             &mut self.prev_right,
             &right_bars,
             settings,
             framerate,
-            &mut self.autosens_r,
+            &self.autosens_stereo,
             &mut self.gravity_r,
         );
+        self.autosens_stereo.adjust_channels(
+            &mut [&mut smooth_l, &mut smooth_r],
+            framerate,
+            silence,
+        );
+        Self::finish_channel(&mut smooth_l, settings);
+        Self::finish_channel(&mut smooth_r, settings);
         (smooth_l, smooth_r)
     }
 }
@@ -880,6 +898,89 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stereo_preserves_relative_channel_level() {
+        let mut vis = VisualizerState::new();
+        vis.resize_bars(16);
+        let settings = render::Settings {
+            smoothing: 0.3,
+            monstercat: false,
+            noise_floor: 0.0,
+            theme_idx: 0,
+            gradient_by_position: false,
+            bar_width: 2,
+            bar_spacing: 1,
+            sensitivity: 100,
+            eq: vec![1.0; 5],
+        };
+        // Same 1 kHz tone; the right channel is 12 dB quieter (×0.25).
+        let tone: Vec<f32> = (0..analysis::FFT_SIZE)
+            .map(|i| 0.5 * (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / 48_000.0).sin())
+            .collect();
+        let right: Vec<f32> = tone.iter().map(|s| s * 0.25).collect();
+
+        let (mut l, mut r) = (vec![], vec![]);
+        for _ in 0..600 {
+            (l, r) = vis.process_stereo(
+                &tone,
+                &right,
+                48_000,
+                50.0,
+                10_000.0,
+                &settings,
+                60.0,
+                &settings.eq,
+            );
+        }
+        let peak = |v: &[f32]| v.iter().cloned().fold(0.0_f32, f32::max);
+        let (pl, pr) = (peak(&l), peak(&r));
+        let db = 20.0 * (pr / pl).log10();
+        assert!(pl > 0.9, "louder channel should reach full scale, got {pl}");
+        assert!(
+            (db + 12.04).abs() < 0.5,
+            "displayed R/L level {db:.2} dB, expected about -12.04 dB"
+        );
+    }
+
+    #[test]
+    fn stereo_hard_panned_source_is_not_treated_as_silence() {
+        let mut vis = VisualizerState::new();
+        vis.resize_bars(16);
+        let settings = render::Settings {
+            smoothing: 0.3,
+            monstercat: false,
+            noise_floor: 0.0,
+            theme_idx: 0,
+            gradient_by_position: false,
+            bar_width: 2,
+            bar_spacing: 1,
+            sensitivity: 100,
+            eq: vec![1.0; 5],
+        };
+        let tone: Vec<f32> = (0..analysis::FFT_SIZE)
+            .map(|i| 0.05 * (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / 48_000.0).sin())
+            .collect();
+        let silent = vec![0.0; analysis::FFT_SIZE];
+        let (mut l, mut r) = (vec![], vec![]);
+        for _ in 0..600 {
+            (l, r) = vis.process_stereo(
+                &tone,
+                &silent,
+                48_000,
+                50.0,
+                10_000.0,
+                &settings,
+                60.0,
+                &settings.eq,
+            );
+        }
+        // With only the left channel active, the shared gain must still adapt
+        // (it would stay at its initial 1.0 if the frame were treated as silent).
+        assert!(vis.autosens_stereo.sens > 1.0);
+        assert!(l.iter().cloned().fold(0.0_f32, f32::max) > 0.9);
+        assert!(r.iter().all(|&v| v == 0.0));
+    }
 
     #[test]
     fn theme_selection_does_not_change_or_rewrite_config() {

@@ -321,14 +321,22 @@ impl AutoSensitivity {
     /// Per-frame factors use `base^(60/fps)` so the per-second rate is
     /// constant regardless of framerate.
     pub fn adjust(&mut self, bars: &mut [f32], framerate: f32, silence: bool) {
+        self.adjust_channels(&mut [bars], framerate, silence);
+    }
+
+    /// Phase 2 for several channels sharing one gain (e.g. stereo L/R).
+    ///
+    /// The overshoot test uses the loudest bar across *all* channels, so one
+    /// gain is applied to every channel and their relative levels are preserved.
+    /// Per-channel gains would instead normalize each channel to full scale and
+    /// erase level differences such as panning or balance.
+    pub fn adjust_channels(&mut self, channels: &mut [&mut [f32]], framerate: f32, silence: bool) {
         let time_scale = 60.0 / framerate;
 
-        let mut max_bar: f32 = 0.0;
-        for bar in bars.iter() {
-            if *bar > max_bar {
-                max_bar = *bar;
-            }
-        }
+        let max_bar = channels
+            .iter()
+            .flat_map(|bars| bars.iter())
+            .fold(0.0_f32, |max, &bar| max.max(bar));
 
         if max_bar > 1.0 {
             // Cut sens by at least 2%/frame (framerate-scaled); for small
@@ -337,7 +345,7 @@ impl AutoSensitivity {
             self.sens *= reduction;
             self.sens_init = false;
 
-            for bar in bars.iter_mut() {
+            for bar in channels.iter_mut().flat_map(|bars| bars.iter_mut()) {
                 if *bar > 1.0 {
                     *bar = 1.0;
                 }
@@ -608,6 +616,38 @@ mod tests {
         let before = a.sens;
         a.adjust(&mut [0.0], 60.0, true);
         assert_eq!(a.sens, before, "sens changed during silence");
+    }
+
+    #[test]
+    fn autosens_channels_share_one_gain_from_the_loudest_channel() {
+        let mut a = AutoSensitivity::new();
+        let mut left = vec![4.0, 0.5];
+        let mut right = vec![1.5, 0.25];
+        a.adjust_channels(&mut [&mut left, &mut right], 60.0, false);
+        // The cut is driven by the overall max (4.0), with the 2%/frame floor.
+        assert!((a.sens - 0.98).abs() < 1e-6, "sens {}", a.sens);
+        // Every overshooting bar in every channel is clamped.
+        assert_eq!(left, vec![1.0, 0.5]);
+        assert_eq!(right, vec![1.0, 0.25]);
+
+        // A quiet channel alone does not cause growth when the other overshoots.
+        let mut b = AutoSensitivity::new();
+        b.adjust_channels(&mut [&mut [1.01][..], &mut [0.0][..]], 60.0, false);
+        assert!((b.sens - 1.0 / 1.01).abs() < 1e-6, "sens {}", b.sens);
+    }
+
+    #[test]
+    fn autosens_single_channel_matches_multi_channel_api() {
+        let mut a = AutoSensitivity::new();
+        let mut b = AutoSensitivity::new();
+        for input in [0.2_f32, 3.0, 0.8, 0.0, 1.05] {
+            let mut x = vec![input, input * 0.5];
+            let mut y = x.clone();
+            a.adjust(&mut x, 60.0, input == 0.0);
+            b.adjust_channels(&mut [&mut y], 60.0, input == 0.0);
+            assert_eq!(x, y);
+            assert_eq!(a.sens, b.sens);
+        }
     }
 
     #[test]
