@@ -510,12 +510,16 @@ fn handle_normal_input(
             return Ok(LoopAction::Skip);
         }
         render::Action::SensUp => {
-            settings.sensitivity = (settings.sensitivity + SENS_STEP).min(500);
+            settings.sensitivity =
+                (settings.sensitivity + SENS_STEP).min(config::SENSITIVITY_RANGE.1);
             save_state(cfg, settings, mode, persist);
             return Ok(LoopAction::Skip);
         }
         render::Action::SensDown => {
-            settings.sensitivity = settings.sensitivity.saturating_sub(SENS_STEP).max(10);
+            settings.sensitivity = settings
+                .sensitivity
+                .saturating_sub(SENS_STEP)
+                .max(config::SENSITIVITY_RANGE.0);
             save_state(cfg, settings, mode, persist);
             return Ok(LoopAction::Skip);
         }
@@ -657,10 +661,10 @@ fn main() -> Result<()> {
         cfg.gradient_by_position = true;
     }
     if let Some(w) = cli.bar_width {
-        cfg.bar_width = w.clamp(1, 8);
+        cfg.bar_width = w;
     }
     if let Some(s) = cli.bar_spacing {
-        cfg.bar_spacing = s.clamp(0, 4);
+        cfg.bar_spacing = s;
     }
 
     let mut mode = Mode::from_str(&cfg.mode);
@@ -691,9 +695,20 @@ fn main() -> Result<()> {
     // Poll now-playing in a background thread via osascript
     audio::start_now_playing_poller(now_playing.clone(), Duration::from_secs(3));
 
+    // Validate config + CLI values once, against the real sample rate, before
+    // anything uses them. Report corrections before the TUI takes the screen.
+    let (valid, notes) = cfg.validated(audio.sample_rate);
+    for n in &notes {
+        eprintln!("specterm: adjusted invalid setting {n}");
+    }
+    if !notes.is_empty() {
+        std::thread::sleep(Duration::from_millis(1500));
+    }
+    cfg = valid;
+
     // Init terminal
     let mut terminal = render::init()?;
-    let fps = cfg.fps.max(1);
+    let fps = cfg.fps;
     let frame_duration = Duration::from_millis(1000 / fps);
     let low_freq = cfg.low_freq;
     let high_freq = cfg.high_freq;
@@ -704,14 +719,14 @@ fn main() -> Result<()> {
     let mut theme_idx = themes.iter().position(|t| t.path == cfg.theme).unwrap_or(0);
 
     let mut settings = render::Settings {
-        smoothing: cfg.smoothing.clamp(0.0, 0.99),
+        smoothing: cfg.smoothing,
         monstercat: cfg.monstercat,
         noise_floor: cfg.noise_floor,
         theme_idx,
         gradient_by_position: cfg.gradient_by_position,
-        bar_width: cfg.bar_width.clamp(1, 8),
-        bar_spacing: cfg.bar_spacing.clamp(0, 4),
-        sensitivity: cfg.sensitivity.clamp(10, 500),
+        bar_width: cfg.bar_width,
+        bar_spacing: cfg.bar_spacing,
+        sensitivity: cfg.sensitivity,
         eq: cfg.eq.clone(),
     };
 

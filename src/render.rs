@@ -1,5 +1,6 @@
 //! Terminal rendering using ratatui + crossterm.
 
+use crate::config;
 use crate::theme::Theme;
 
 use anyhow::Result;
@@ -298,8 +299,10 @@ pub fn render_settings(
     let accent = theme.wave_color;
     let border_color = theme.gradient[theme.gradient.len() / 2];
 
-    let smoothing_bar = slider_bar(settings.smoothing, 0.0, 0.99, 20);
-    let noise_bar = slider_bar(settings.noise_floor, 0.0, 0.05, 20);
+    let (s_lo, s_hi) = config::SMOOTHING_RANGE;
+    let (n_lo, n_hi) = config::NOISE_FLOOR_RANGE;
+    let smoothing_bar = slider_bar(settings.smoothing, s_lo, s_hi, 20);
+    let noise_bar = slider_bar(settings.noise_floor, n_lo, n_hi, 20);
 
     // Helper: build a settings row with cursor indicator for selected item
     let label = |name: &str, idx: usize| -> Span {
@@ -413,7 +416,8 @@ fn adjust_setting(settings: &mut Settings, idx: usize, direction: i32, num_theme
         }
         1 => {
             // Smoothing: step by 0.05
-            settings.smoothing = (settings.smoothing + direction as f32 * 0.05).clamp(0.0, 0.99);
+            let (lo, hi) = config::SMOOTHING_RANGE;
+            settings.smoothing = (settings.smoothing + direction as f32 * 0.05).clamp(lo, hi);
         }
         2 => {
             // Monstercat: toggle
@@ -421,8 +425,8 @@ fn adjust_setting(settings: &mut Settings, idx: usize, direction: i32, num_theme
         }
         3 => {
             // Noise floor: step by 0.001
-            settings.noise_floor =
-                (settings.noise_floor + direction as f32 * 0.001).clamp(0.0, 0.05);
+            settings.noise_floor = (settings.noise_floor + direction as f32 * 0.001)
+                .clamp(config::NOISE_FLOOR_RANGE.0, config::NOISE_FLOOR_RANGE.1);
         }
         4 => {
             // Gradient mode: toggle
@@ -430,23 +434,30 @@ fn adjust_setting(settings: &mut Settings, idx: usize, direction: i32, num_theme
         }
         5 => {
             // Bar width: 1–8
-            settings.bar_width = (settings.bar_width as i32 + direction).clamp(1, 8) as usize;
+            let (lo, hi) = config::BAR_WIDTH_RANGE;
+            settings.bar_width =
+                (settings.bar_width as i32 + direction).clamp(lo as i32, hi as i32) as usize;
         }
         6 => {
             // Bar spacing: 0–4
-            settings.bar_spacing = (settings.bar_spacing as i32 + direction).clamp(0, 4) as usize;
+            let (lo, hi) = config::BAR_SPACING_RANGE;
+            settings.bar_spacing =
+                (settings.bar_spacing as i32 + direction).clamp(lo as i32, hi as i32) as usize;
         }
         7 => {
             // Sensitivity: 10–500 in steps of 10
-            settings.sensitivity =
-                (settings.sensitivity as i32 + direction * 10).clamp(10, 500) as u32;
+            settings.sensitivity = (settings.sensitivity as i32 + direction * 10).clamp(
+                config::SENSITIVITY_RANGE.0 as i32,
+                config::SENSITIVITY_RANGE.1 as i32,
+            ) as u32;
         }
         i if i >= 8 && i - 8 < settings.eq.len() => {
             // EQ band: step by 0.1, range 0.0–3.0
             let band = i - 8;
             let raw = settings.eq[band] + direction as f32 * 0.1;
             settings.eq[band] = (raw * 10.0).round() / 10.0;
-            settings.eq[band] = settings.eq[band].clamp(0.0, 3.0);
+            settings.eq[band] =
+                settings.eq[band].clamp(config::EQ_GAIN_RANGE.0, config::EQ_GAIN_RANGE.1);
         }
         _ => {}
     }
@@ -699,12 +710,7 @@ pub fn render_scope(
     device: &str,
     actual_fps: Option<u32>,
 ) {
-    let trigger_offset = samples
-        .windows(2)
-        .position(|w| w[0] <= 0.0 && w[1] > 0.0)
-        .unwrap_or(0);
-
-    let triggered = &samples[trigger_offset..];
+    let triggered = scope_window(samples);
     let border_color = theme.gradient[theme.gradient.len() / 2];
     let fps_str = actual_fps.map(|f| format!(" {}fps", f)).unwrap_or_default();
     let title = format!(" specterm — oscilloscope{} ", fps_str);
@@ -717,6 +723,53 @@ pub fn render_scope(
         theme.scope_color,
         border_color,
     );
+}
+
+/// Fraction of the sample buffer the oscilloscope displays. The rest is the
+/// region searched for a trigger, so a trigger is always found for any signal
+/// whose period is shorter than that region (≈ 23 Hz and up at 48 kHz).
+const SCOPE_WINDOW_FRACTION: usize = 2;
+
+/// Pick a fixed-length, trigger-aligned slice of `samples` for the oscilloscope.
+///
+/// The trigger is the first rising zero crossing within the leading part of the
+/// buffer; the displayed slice always has the same length, so the horizontal
+/// timebase stays constant. (Displaying `samples[trigger..]` instead made the
+/// zoom depend on where the trigger landed: up to 61% at 30 Hz.)
+fn scope_window(samples: &[f32]) -> &[f32] {
+    let window = samples.len() / SCOPE_WINDOW_FRACTION;
+    if window < 2 {
+        return samples;
+    }
+    let search = samples.len() - window;
+    let trigger = samples[..=search]
+        .windows(2)
+        .position(|w| w[0] <= 0.0 && w[1] > 0.0)
+        .unwrap_or(0);
+    &samples[trigger..trigger + window]
+}
+
+/// Per-column (min, max) envelope of `samples` across `cols` columns.
+///
+/// Each column covers a contiguous sample range and is widened to include the
+/// last sample of the previous column so adjacent spans connect without gaps.
+fn column_envelope(samples: &[f32], cols: usize) -> Vec<(f32, f32)> {
+    if samples.is_empty() || cols == 0 {
+        return Vec::new();
+    }
+    let n = samples.len();
+    let mut out = Vec::with_capacity(cols);
+    for i in 0..cols {
+        let start = i * n / cols;
+        let end = ((i + 1) * n / cols).max(start + 1).min(n);
+        // Include the previous column's last sample so spans connect.
+        let span = &samples[start.saturating_sub(1)..end];
+        let (lo, hi) = span
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+        out.push((lo, hi));
+    }
+    out
 }
 
 fn render_wave_inner(
@@ -746,20 +799,19 @@ fn render_wave_inner(
         .x_bounds([0.0, inner.width as f64])
         .y_bounds([-1.0, 1.0])
         .paint(|ctx| {
-            if samples.len() < 2 {
-                return;
-            }
-            let step = samples.len() as f64 / inner.width as f64;
-            for i in 0..inner.width.saturating_sub(1) as usize {
-                let idx0 = (i as f64 * step) as usize;
-                let idx1 = ((i + 1) as f64 * step) as usize;
-                let y0 = samples.get(idx0).copied().unwrap_or(0.0) as f64;
-                let y1 = samples.get(idx1).copied().unwrap_or(0.0) as f64;
+            for (i, &(lo, hi)) in column_envelope(samples, inner.width as usize)
+                .iter()
+                .enumerate()
+            {
+                // Vertical span covering every sample in this column. Drawing the
+                // full range (instead of one sample per column) keeps content
+                // above the column rate from aliasing into false low-frequency
+                // shapes.
                 ctx.draw(&CanvasLine {
                     x1: i as f64,
-                    y1: y0,
-                    x2: (i + 1) as f64,
-                    y2: y1,
+                    y1: lo as f64,
+                    x2: i as f64,
+                    y2: hi as f64,
                     color,
                 });
             }
@@ -948,5 +1000,98 @@ pub fn render_stereo(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sine(freq: f32, phase: f32, n: usize) -> Vec<f32> {
+        (0..n)
+            .map(|i| (2.0 * std::f32::consts::PI * freq * i as f32 / 48_000.0 + phase).sin())
+            .collect()
+    }
+
+    #[test]
+    fn scope_window_length_is_constant_regardless_of_trigger_position() {
+        // Previously the visible span varied up to 61% at 30 Hz.
+        for freq in [30.0_f32, 60.0, 110.0, 440.0] {
+            for k in 0..32 {
+                let phase = k as f32 / 32.0 * 2.0 * std::f32::consts::PI;
+                let s = sine(freq, phase, 4096);
+                assert_eq!(scope_window(&s).len(), 2048, "{freq} Hz phase {k}/32");
+            }
+        }
+    }
+
+    #[test]
+    fn scope_window_starts_at_rising_zero_crossing() {
+        for freq in [30.0_f32, 110.0, 440.0] {
+            for k in 0..8 {
+                let phase = k as f32 / 8.0 * 2.0 * std::f32::consts::PI + 0.1;
+                let s = sine(freq, phase, 4096);
+                let w = scope_window(&s);
+                // First displayed sample is just after an upward crossing.
+                assert!(
+                    w[0] <= 0.0 && w[1] > 0.0,
+                    "{freq} Hz phase {k}: {} {}",
+                    w[0],
+                    w[1]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scope_window_handles_silence_and_tiny_buffers() {
+        let silent = vec![0.0; 4096];
+        assert_eq!(scope_window(&silent).len(), 2048);
+        assert_eq!(scope_window(&[0.5]).len(), 1);
+        assert!(scope_window(&[]).is_empty());
+    }
+
+    #[test]
+    fn column_envelope_shows_full_amplitude_of_high_frequency_content() {
+        // 10 kHz across 200 columns: one sample per column aliases; min/max
+        // spans must still reach close to ±1 in every column.
+        let s = sine(10_000.0, 0.0, 4096);
+        let env = column_envelope(&s, 200);
+        assert_eq!(env.len(), 200);
+        for (i, &(lo, hi)) in env.iter().enumerate() {
+            assert!(lo < -0.9 && hi > 0.9, "column {i}: {lo}..{hi}");
+        }
+    }
+
+    #[test]
+    fn column_envelope_tracks_low_frequency_shape() {
+        // 20 Hz across 4096 samples spans less than one cycle; columns should
+        // follow the curve rather than all spanning ±1.
+        let s = sine(20.0, 0.0, 4096);
+        let env = column_envelope(&s, 100);
+        let widest = env.iter().map(|(lo, hi)| hi - lo).fold(0.0_f32, f32::max);
+        assert!(widest < 0.2, "widest column span {widest}");
+    }
+
+    #[test]
+    fn column_envelope_adjacent_columns_connect() {
+        let s = sine(5_000.0, 0.3, 4096);
+        let env = column_envelope(&s, 300);
+        for w in env.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            assert!(a.0 <= b.1 && b.0 <= a.1, "gap between {a:?} and {b:?}");
+        }
+    }
+
+    #[test]
+    fn column_envelope_more_columns_than_samples() {
+        let env = column_envelope(&[0.1, -0.2, 0.3], 10);
+        assert_eq!(env.len(), 10);
+        for &(lo, hi) in &env {
+            assert!(lo <= hi);
+            assert!((-0.2..=0.3).contains(&lo) && (-0.2..=0.3).contains(&hi));
+        }
+        assert!(column_envelope(&[], 10).is_empty());
+        assert!(column_envelope(&[0.1], 0).is_empty());
     }
 }
